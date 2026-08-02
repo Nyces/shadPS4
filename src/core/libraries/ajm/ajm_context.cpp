@@ -127,8 +127,29 @@ s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* 
     // batch_id after an earlier blocking wait succeeded; without this we'd
     // return INVALID_BATCH because the slot was destroyed, and the game would
     // think batch processing failed (stalling BGM progress polling).
+    //
+    // Guard rails: only trust the saved result if the batch was actually
+    // processed. In the (theoretical) case that processed==false but
+    // consumed==true (e.g. canceled worker raced with the save, or a prior
+    // timeout=16 wait returned CANCELLED), fall through to the normal wait
+    // path so the caller gets the semaphore-driven truth instead of stale
+    // state. If processed AND canceled both hold, return the saved
+    // CANCELLED result explicitly so the two code paths agree.
     if (batch->consumed.load(std::memory_order_acquire)) {
-        return batch->last_wait_result;
+        if (!batch->processed.load(std::memory_order_acquire)) {
+            LOG_WARNING(Lib_Ajm,
+                        "sceAjmBatchWait batch {} consumed=true but processed=false, "
+                        "falling through to normal wait",
+                        batch_id);
+        } else if (batch->canceled.load(std::memory_order_acquire) &&
+                   batch->last_wait_result == ORBIS_OK) {
+            // Worker finished (processed=true) but the batch was also
+            // canceled; re-derive the cancelled result to stay consistent
+            // with a fresh wait through the semaphore.
+            return ORBIS_AJM_ERROR_CANCELLED;
+        } else {
+            return batch->last_wait_result;
+        }
     }
 
     bool expected = false;
