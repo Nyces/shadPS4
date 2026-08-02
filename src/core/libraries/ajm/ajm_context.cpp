@@ -69,6 +69,12 @@ void AjmContext::WorkerThread(std::stop_token stop) {
     Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
     while (!stop.stop_requested()) {
         auto batch = batch_queue.PopWait(stop);
+        const u32 pop_id = batch ? batch->id : 0u;
+        const bool pop_canceled =
+            batch ? bool(batch->canceled.load(std::memory_order_acquire)) : false;
+        const size_t pop_jobs = batch ? batch->jobs.size() : 0u;
+        LOG_INFO(Lib_Ajm, "WorkerPop batch={} valid={} canceled={} jobs={} (before ProcessBatch)",
+                 pop_id, batch != nullptr, pop_canceled, pop_jobs);
         if (batch != nullptr && !batch->canceled) {
             bool expected = false;
             batch->processed.compare_exchange_strong(expected, true);
@@ -79,6 +85,13 @@ void AjmContext::WorkerThread(std::stop_token stop) {
 }
 
 void AjmContext::ProcessBatch(u32 id, std::span<AjmJob> jobs) {
+    if (jobs.size() > 0) {
+        const auto& first = jobs.front();
+        LOG_INFO(Lib_Ajm, "ProcessBatch START batch={} jobs={} first_inst={} first_flags_raw={:#x}",
+                 id, jobs.size(), first.instance_id, first.flags.raw);
+    } else {
+        LOG_INFO(Lib_Ajm, "ProcessBatch START batch={} jobs=0", id);
+    }
     // Perform operation requested by control flags.
     for (auto& job : jobs) {
         LOG_TRACE(Lib_Ajm, "Processing job {} for instance {}. flags = {:#x}", id, job.instance_id,
