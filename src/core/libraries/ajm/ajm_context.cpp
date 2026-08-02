@@ -112,6 +112,7 @@ void AjmContext::ProcessBatch(u32 id, std::span<AjmJob> jobs) {
 
 s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* const batch_error) {
     std::shared_ptr<AjmBatch> batch{};
+    s32 wait_result = ORBIS_OK;
     {
         std::shared_lock guard(batches_mutex);
         const auto p_batch = batches.Get(batch_id);
@@ -119,6 +120,15 @@ s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* 
             return ORBIS_AJM_ERROR_INVALID_BATCH;
         }
         batch = *p_batch;
+    }
+
+    // If a previous wait already consumed this batch, return the saved result.
+    // Game code (e.g. nusc in S4U Live) uses timeout=0 polling on the same
+    // batch_id after an earlier blocking wait succeeded; without this we'd
+    // return INVALID_BATCH because the slot was destroyed, and the game would
+    // think batch processing failed (stalling BGM progress polling).
+    if (batch->consumed.load(std::memory_order_acquire)) {
+        return batch->last_wait_result;
     }
 
     bool expected = false;
@@ -140,16 +150,23 @@ s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* 
         LOG_WARNING(Lib_Ajm, "sceAjmBatchWait blocked for {} ms on batch {}", wait_ms, batch_id);
     }
 
+    // Determine the final status before marking consumed.
+    if (batch->canceled) {
+        wait_result = ORBIS_AJM_ERROR_CANCELLED;
+    } else {
+        wait_result = ORBIS_OK;
+    }
+
+    // Mark the batch as consumed so subsequent polls return the same result
+    // instead of INVALID_BATCH. The slot is recycled later when a new
+    // BatchStartBuffer allocates the same id.
     {
         std::unique_lock guard(batches_mutex);
-        batches.Destroy(batch_id);
+        batch->consumed.store(true, std::memory_order_release);
+        batch->last_wait_result = wait_result;
     }
 
-    if (batch->canceled) {
-        return ORBIS_AJM_ERROR_CANCELLED;
-    }
-
-    return ORBIS_OK;
+    return wait_result;
 }
 
 int AjmContext::BatchStartBuffer(u8* p_batch, u32 batch_size, const int priority,
