@@ -194,6 +194,24 @@ void AjmInstance::ExecuteJob(AjmJob& job) {
     if (job.output.p_codec_info != nullptr) {
         m_codec->GetInfo(job.output.p_codec_info);
     }
+
+    // Per-job summary so we can compare "working" (main menu BGM) vs
+    // "silent" (S4U Live BGM/voice) decode jobs. The sideband stream
+    // fields (input_consumed/output_written/frames_decoded) are what the
+    // nusc middleware reads to decide if usable PCM was produced; if they
+    // are zero while frames_decoded > 0, the game discards the batch and
+    // never submits the PCM to sceAudioOutOutput.
+    const auto input_consumed = in_size - in_buf.size();
+    const auto output_written = out_size - out_buf.Size();
+    LOG_INFO(Lib_Ajm,
+             "JobSummary inst={} frames={} in_total={} in_consumed={} "
+             "out_total={} out_written={} total_samples={} result={:#x} "
+             "p_result={} p_stream={} p_mframe={} p_format={} p_gapless={}",
+             job.instance_id, frames_decoded, in_size, input_consumed, out_size, output_written,
+             m_total_samples, job.output.p_result ? job.output.p_result->result : 0u,
+             job.output.p_result != nullptr, job.output.p_stream != nullptr,
+             job.output.p_mframe != nullptr, job.output.p_format != nullptr,
+             job.output.p_gapless_decode != nullptr);
 }
 
 bool AjmInstance::HasEnoughSpace(const SparseOutputBuffer& output) const {

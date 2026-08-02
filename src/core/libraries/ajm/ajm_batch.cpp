@@ -320,6 +320,20 @@ AjmJob AjmJobFromBatchBuffer(u32 instance_id, AjmBatchBuffer batch_buffer) {
         }
     }
 
+    // Sideband layout diagnostic. If the S4U Live silent jobs differ from
+    // the working main-menu BGM jobs by missing p_stream or p_mframe
+    // pointers, the corresponding consumed/written fields never get set
+    // and nusc thinks the batch produced no PCM (sceAudioOutOutput count
+    // observed at 0 for the whole Live run).
+    const auto sb = job_flags->sideband_flags;
+    LOG_INFO(Lib_Ajm,
+             "JobLayout inst={} sideband_flags={:#x} run_flags={:#x} "
+             "p_result={} p_stream={} p_mframe={} p_format={} p_gapless={}",
+             instance_id, std::to_underlying(sb), std::to_underlying(job_flags->run_flags),
+             job.output.p_result != nullptr, job.output.p_stream != nullptr,
+             job.output.p_mframe != nullptr, job.output.p_format != nullptr,
+             job.output.p_gapless_decode != nullptr);
+
     return job;
 }
 
