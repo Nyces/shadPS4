@@ -245,6 +245,9 @@ AjmJob AjmJobFromBatchBuffer(u32 instance_id, AjmBatchBuffer batch_buffer) {
         case Identifier::AjmIdentOutputRunBuf: {
             auto& buffer = batch_buffer.Consume<AjmChunkBuffer>();
             u8* p_begin = reinterpret_cast<u8*>(buffer.p_address);
+            LOG_WARNING(Lib_Ajm,
+                        "AjmJobFromBatchBuffer: OutputRunBuf instance={} size={} p_address={:#x}",
+                        instance_id, buffer.size, reinterpret_cast<uintptr_t>(buffer.p_address));
             if (p_begin != nullptr && buffer.size != 0) {
                 job.output.buffers.emplace_back(std::span<u8>(p_begin, p_begin + buffer.size));
             }
