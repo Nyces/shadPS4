@@ -77,6 +77,11 @@ void AjmAt9Decoder::Initialize(const void* buffer, u32 buffer_size) {
     const auto params = reinterpret_cast<const AjmDecAt9InitializeParameters*>(buffer);
     std::memcpy(m_config_data, params->config_data, ORBIS_AT9_CONFIG_DATA_SIZE);
     AjmAt9Decoder::Reset();
+    LOG_INFO(Lib_Ajm,
+             "AT9 initialized: superframeSize={} framesInSuperframe={} frameSamples={} "
+             "channels={} sampleRate={}",
+             m_codec_info.superframeSize, m_codec_info.framesInSuperframe,
+             m_codec_info.frameSamples, m_codec_info.channels, m_codec_info.samplingRate);
     m_pcm_buffer.resize(m_codec_info.frameSamples * m_codec_info.channels * GetPCMSize(m_format),
                         0);
     m_is_initialized = true;

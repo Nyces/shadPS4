@@ -126,6 +126,12 @@ void AjmInstance::ExecuteJob(AjmJob& job) {
                 job.output.p_result->result |= ORBIS_AJM_RESULT_PARTIAL_INPUT;
             }
             if (job.output.p_result->result != 0) {
+                LOG_WARNING(Lib_Ajm,
+                            "instance {} result={:#x} in_size={} required_in={} out_size={} "
+                            "required_out={} flags={:#x}",
+                            job.instance_id, job.output.p_result->result, in_buf.size(),
+                            m_codec->GetMinimumInputSize(), out_buf.Size(),
+                            m_codec->GetNextFrameSize(m_gapless), job.flags.raw);
                 break;
             }
             const auto result = m_codec->ProcessData(in_buf, out_buf, m_gapless);
