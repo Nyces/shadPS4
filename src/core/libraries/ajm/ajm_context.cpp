@@ -116,11 +116,18 @@ s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* 
         return ORBIS_AJM_ERROR_BUSY;
     }
 
+    const auto wait_begin = std::chrono::high_resolution_clock::now();
     if (timeout == ORBIS_AJM_WAIT_INFINITE) {
         batch->finished.acquire();
     } else if (!batch->finished.try_acquire_for(std::chrono::milliseconds(timeout))) {
         batch->waiting = false;
         return ORBIS_AJM_ERROR_IN_PROGRESS;
+    }
+    const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::high_resolution_clock::now() - wait_begin)
+                             .count();
+    if (wait_ms > 50) {
+        LOG_WARNING(Lib_Ajm, "sceAjmBatchWait blocked for {} ms on batch {}", wait_ms, batch_id);
     }
 
     {
@@ -176,8 +183,14 @@ s32 AjmContext::InstanceCreate(AjmCodecType codec_type, AjmInstanceFlags flags, 
     }
     std::optional<u32> opt_index;
     {
+        // Construct the instance (including AT9 decoder init) outside the
+        // lock to minimize exclusive lock hold time. During the S4U Live
+        // AT9 create-destroy livelock, the worker's ProcessBatch takes a
+        // shared lock on instances_mutex; a long exclusive hold here
+        // blocks every batch and stalls sceAjmBatchWait on the game thread.
+        auto instance = std::make_unique<AjmInstance>(codec_type, flags);
         std::unique_lock lock(instances_mutex);
-        opt_index = instances.Create(std::move(std::make_unique<AjmInstance>(codec_type, flags)));
+        opt_index = instances.Create(std::move(instance));
     }
     if (!opt_index.has_value()) {
         return ORBIS_AJM_ERROR_OUT_OF_RESOURCES;
