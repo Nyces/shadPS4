@@ -34,8 +34,12 @@ constexpr u64 VOLUME_CHECK_INTERVAL_US = 50000; // Check every 50ms
 constexpr u64 MIN_SLEEP_THRESHOLD_US = 10;
 constexpr u64 TIMING_RESYNC_THRESHOLD_US = 100000; // Resync if >100ms behind
 
+// Catch-up constants
+constexpr u64 MAX_CATCHUP_PER_PERIOD_US = 5000; // Max 5ms catch-up per period
+constexpr u64 MIN_PERIOD_US = 1000; // Minimum period to prevent runaway
+
 // Queue management
-constexpr u32 QUEUE_MULTIPLIER = 4;
+constexpr u32 QUEUE_MULTIPLIER = 6; // Increased buffer headroom
 // Memory alignment for SIMD
 constexpr size_t AUDIO_BUFFER_ALIGNMENT = 32;
 
@@ -88,6 +92,16 @@ public:
 
         if ((output_count++ & 0xF) == 0) { // Check every 16 outputs
             ManageAudioQueue();
+        }
+
+        // Prevent queue overrun by skipping frame if critically backed up
+        const auto queued = SDL_GetAudioStreamQueued(stream);
+        constexpr u32 CRITICAL_QUEUE_MULTIPLIER = 2;
+        const u32 critical_threshold = queue_threshold * CRITICAL_QUEUE_MULTIPLIER;
+        if (queued >= critical_threshold) [[unlikely]] {
+            LOG_WARNING(Lib_AudioOut, "Dropping audio frame: queue critically backed up ({} >= {})", queued, critical_threshold);
+            last_output_time.store(current_time, std::memory_order_release);
+            return;
         }
 
         if (!SDL_PutAudioStreamData(stream, internal_buffer, internal_buffer_size)) [[unlikely]] {
@@ -239,19 +253,31 @@ private:
                 std::this_thread::sleep_for(std::chrono::microseconds(sleep_duration));
             }
         } else {
-            // Slightly behind or on time - just advance
-            next_output_time += period_us;
+            // Behind schedule - try to catch up gradually
+            // Limit catch-up to avoid audio artifacts
+            const u64 catchup = std::min<u64>(time_diff, MAX_CATCHUP_PER_PERIOD_US);
+            if (catchup > 0 && period_us > catchup + MIN_PERIOD_US) {
+                next_output_time += period_us - catchup;
+            } else {
+                next_output_time += period_us;
+            }
         }
     }
 
     void ManageAudioQueue() {
         const auto queued = SDL_GetAudioStreamQueued(stream);
 
-        if (queued >= queue_threshold) [[unlikely]] {
-            LOG_DEBUG(Lib_AudioOut, "Clearing backed up audio queue ({} >= {})", queued,
-                      queue_threshold);
+        // Only clear queue in extreme cases to avoid audio artifacts
+        constexpr u32 CRITICAL_QUEUE_MULTIPLIER = 2;
+        const u32 critical_threshold = queue_threshold * CRITICAL_QUEUE_MULTIPLIER;
+
+        if (queued >= critical_threshold) [[unlikely]] {
+            LOG_WARNING(Lib_AudioOut, "Audio queue critically backed up ({} >= {}), clearing", queued, critical_threshold);
             SDL_ClearAudioStream(stream);
             CalculateQueueThreshold();
+        } else if (queued >= queue_threshold) {
+            LOG_DEBUG(Lib_AudioOut, "Audio queue backed up ({} >= {}), pausing input", queued, queue_threshold);
+            // Don't clear - let it drain naturally to avoid audio glitches
         }
     }
 
