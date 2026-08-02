@@ -97,6 +97,16 @@ void AjmContext::ProcessBatch(u32 id, std::span<AjmJob> jobs) {
 
             instance->ExecuteJob(job);
         }
+
+        // Log non-zero job results to surface silent AT9 decode issues
+        // (PARTIAL_INPUT, NOT_ENOUGH_ROOM, CODEC_ERROR, etc.) that may cause
+        // the game to retry instances or produce audio gaps.
+        if (job.output.p_result != nullptr && job.output.p_result->result != 0) {
+            LOG_WARNING(Lib_Ajm,
+                        "Batch {} job for instance {} returned result = {:#x}, internal = {:#x}",
+                        id, job.instance_id, job.output.p_result->result,
+                        job.output.p_result->internal_result);
+        }
     }
 }
 
@@ -126,7 +136,7 @@ s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* 
     const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::high_resolution_clock::now() - wait_begin)
                              .count();
-    if (wait_ms > 50) {
+    if (wait_ms > 20) {
         LOG_WARNING(Lib_Ajm, "sceAjmBatchWait blocked for {} ms on batch {}", wait_ms, batch_id);
     }
 
