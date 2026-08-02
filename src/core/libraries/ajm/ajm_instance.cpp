@@ -111,6 +111,11 @@ void AjmInstance::ExecuteJob(AjmJob& job) {
     auto out_size = out_buf.Size();
     u32 frames_decoded = 0;
 
+    LOG_WARNING(Lib_Ajm,
+                "ExecuteJob: instance={} input.buffer.size()={} output.buffers.size()={} "
+                "flags={:#x}",
+                job.instance_id, job.input.buffer.size(), job.output.buffers.size(), job.flags.raw);
+
     if (!job.input.buffer.empty()) {
         for (;;) {
             if (m_flags.gapless_loop && m_gapless.IsEnd()) {

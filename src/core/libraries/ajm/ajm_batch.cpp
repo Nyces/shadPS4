@@ -213,6 +213,9 @@ AjmJob AjmJobFromBatchBuffer(u32 instance_id, AjmBatchBuffer batch_buffer) {
         case Identifier::AjmIdentInputRunBuf: {
             auto& buffer = batch_buffer.Consume<AjmChunkBuffer>();
             u8* p_begin = reinterpret_cast<u8*>(buffer.p_address);
+            LOG_WARNING(Lib_Ajm,
+                        "AjmJobFromBatchBuffer: InputRunBuf instance={} size={} p_address={:#x}",
+                        instance_id, buffer.size, reinterpret_cast<uintptr_t>(buffer.p_address));
             job.input.buffer.insert(job.input.buffer.end(), p_begin, p_begin + buffer.size);
             break;
         }
