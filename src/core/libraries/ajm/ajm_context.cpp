@@ -62,6 +62,11 @@ s32 AjmContext::ModuleRegister(AjmCodecType type) {
 
 void AjmContext::WorkerThread(std::stop_token stop) {
     Common::SetCurrentThreadName("shadPS4:AjmWorker");
+    // AT9 decode latency directly gates sceAjmBatchWait, which the game
+    // calls on its main thread. Without elevated priority the single
+    // worker gets starved during shader compilation / resource loading
+    // bursts, delaying batch completion and stalling the game main thread.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
     while (!stop.stop_requested()) {
         auto batch = batch_queue.PopWait(stop);
         if (batch != nullptr && !batch->canceled) {

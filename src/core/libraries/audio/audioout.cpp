@@ -163,6 +163,13 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
         const auto thread_name = fmt::format("shadPS4:AudioOutputThread:{}", fmt::ptr(port.get()));
         Common::SetCurrentThreadName(thread_name.c_str());
     }
+    // The audio output thread drives the blocking rhythm of
+    // sceAudioOutOutput, which the game uses to advance its BGM progress
+    // counter and dance animation timing. Without an elevated priority it
+    // gets starved during GPU shader compilation bursts (CPU-intensive),
+    // stretching the nominal ~21 ms period and stalling the game main
+    // thread waiting on output_cv.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
 
     Common::AccurateTimer timer(
         std::chrono::nanoseconds(1000000000ULL * port->buffer_frames / port->sample_rate));
