@@ -192,12 +192,13 @@ s32 AjmContext::BatchWait(const u32 batch_id, const u32 timeout, AjmBatchError* 
     }
 
     // Mark the batch as consumed so subsequent polls return the same result
-    // instead of INVALID_BATCH. The slot is recycled later when a new
-    // BatchStartBuffer allocates the same id.
+    // instead of INVALID_BATCH. The slot is recycled later by StartBuffer
+    // when the retain window is full.
     {
         std::unique_lock guard(batches_mutex);
         batch->consumed.store(true, std::memory_order_release);
         batch->last_wait_result = wait_result;
+        consumed_batch_ids.push_back(batch_id);
     }
 
     return wait_result;
@@ -211,12 +212,50 @@ int AjmContext::BatchStartBuffer(u8* p_batch, u32 batch_size, const int priority
     }
 
     const auto batch_info = AjmBatch::FromBatchBuffer({p_batch, batch_size});
+
+    // Before allocating a fresh slot, free consumed batches outside the
+    // recent retain window. Otherwise we hit MaxBatches=1024 slots after
+    // ~1024 StartBuffer calls and every later batch creation silently
+    // fails with ERROR_OUT_OF_MEMORY, which effectively drops 97% of the
+    // decode jobs while keeping S4U Live only barely running on the first
+    // 1023 queued jobs (af3b10c8 observed 41338 StartBuffer vs 1023
+    // WorkerPop because of this).
+    u32 trimmed = 0;
+    {
+        std::unique_lock guard(batches_mutex);
+        while (consumed_batch_ids.size() > ConsumedBatchTrimThreshold &&
+               consumed_batch_ids.size() > ConsumedBatchRetainWindow) {
+            const auto old_id = consumed_batch_ids.front();
+            consumed_batch_ids.pop_front();
+            // Check again: a recent StartBuffer may have re-allocated the
+            // same numeric id for a brand-new batch (same slot_array index
+            // after a Destroy+Create cycle). In that case the new batch
+            // overrides the slot pointer so id still belongs to batches -
+            // but the caller has already re-issued it, so we MUST NOT
+            // Destroy blindly. We only Destroy if the pointer still has
+            // consumed==true (i.e. it really is our old batch).
+            auto* p_old_batch = batches.Get(old_id);
+            if (p_old_batch != nullptr && p_old_batch->get() != nullptr &&
+                (*p_old_batch)->consumed.load(std::memory_order_acquire)) {
+                batches.Destroy(old_id);
+                ++trimmed;
+            }
+        }
+    }
+    if (trimmed > 0) {
+        LOG_INFO(Lib_Ajm, "BatchStartBuffer trimmed {} stale consumed batches before Create",
+                 trimmed);
+    }
+
     std::optional<u32> batch_id;
     {
         std::unique_lock guard(batches_mutex);
         batch_id = batches.Create(batch_info);
     }
     if (!batch_id.has_value()) {
+        LOG_ERROR(Lib_Ajm,
+                  "ORBIS_AJM_ERROR_OUT_OF_MEMORY at StartBuffer (MaxBatches={}, consumed_deque={})",
+                  MaxBatches, consumed_batch_ids.size());
         return ORBIS_AJM_ERROR_OUT_OF_MEMORY;
     }
     *out_batch_id = batch_id.value();
