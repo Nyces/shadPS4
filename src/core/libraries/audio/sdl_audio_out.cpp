@@ -30,8 +30,7 @@ constexpr float VOLUME_0DB = 32768.0f; // 1 << 15
 constexpr float INV_VOLUME_0DB = 1.0f / VOLUME_0DB;
 constexpr float VOLUME_EPSILON = 0.001f;
 // Timing constants
-constexpr u64 VOLUME_CHECK_INTERVAL_US = 50000; // Check every 50ms
-constexpr u64 MIN_SLEEP_THRESHOLD_US = 10;
+constexpr u64 VOLUME_CHECK_INTERVAL_US = 50000;    // Check every 50ms
 constexpr u64 TIMING_RESYNC_THRESHOLD_US = 100000; // Resync if >100ms behind
 
 // Queue management
@@ -228,18 +227,15 @@ private:
         if (time_diff > static_cast<s64>(TIMING_RESYNC_THRESHOLD_US)) [[unlikely]] {
             // We're far behind - resync
             next_output_time = current_time + period_us;
-        } else if (time_diff < 0) {
-            // We're ahead of schedule - wait
-            const u64 time_to_wait = static_cast<u64>(-time_diff);
-            next_output_time += period_us;
-
-            if (time_to_wait > MIN_SLEEP_THRESHOLD_US) {
-                // Sleep for most of the wait period
-                const u64 sleep_duration = time_to_wait - MIN_SLEEP_THRESHOLD_US;
-                std::this_thread::sleep_for(std::chrono::microseconds(sleep_duration));
-            }
         } else {
-            // Slightly behind or on time - just advance
+            // Advance the schedule without sleeping here.
+            // The AudioOutputThread's AccurateTimer already paces output at the
+            // correct rate (buffer_frames / sample_rate). Sleeping inside Output()
+            // would block while holding port->mutex, stalling the game thread that
+            // is waiting on output_cv in sceAudioOutOutput - this was the root
+            // cause of audio stuttering and S4U Live animation freezes: the game
+            // uses sceAudioOutOutput's blocking rhythm to advance its BGM progress
+            // counter, which in turn drives character dance animations.
             next_output_time += period_us;
         }
     }
