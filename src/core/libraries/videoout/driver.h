@@ -1,12 +1,14 @@
-﻿// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "common/polyfill_thread.h"
 #include "core/libraries/videoout/video_out.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -52,7 +54,19 @@ struct VideoOutPort {
 
     void WaitVoLabel(auto&& pred) {
         std::unique_lock lk{vo_mutex};
-        vo_cv.wait(lk, pred);
+        auto wr_start = std::chrono::steady_clock::now();
+        bool wr_warned = false;
+        while (!pred()) {
+            if (vo_cv.wait_for(lk, std::chrono::milliseconds(500)) == std::cv_status::timeout) {
+                if (!wr_warned) {
+                    auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - wr_start)
+                                          .count();
+                    LOG_WARNING(Lib_VideoOut, "WaitVoLabel waiting for {}ms", wr_elapsed);
+                    wr_warned = true;
+                }
+            }
+        }
     }
 
     void SignalVoLabel() {

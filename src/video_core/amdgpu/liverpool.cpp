@@ -5,6 +5,7 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "common/polyfill_thread.h"
 #include "common/thread.h"
 #include "core/debug_state.h"
@@ -829,8 +830,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
+                auto rw_start = std::chrono::steady_clock::now();
+                bool rw_warned = false;
                 while (!rewind->Valid()) {
                     YIELD_GFX();
+                    if (!rw_warned) {
+                        auto rw_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - rw_start)
+                                              .count();
+                        if (rw_elapsed >= 500) {
+                            LOG_WARNING(Render, "GFX Rewind waiting for {}ms", rw_elapsed);
+                            rw_warned = true;
+                        }
+                    }
                 }
                 break;
             }
@@ -844,6 +856,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
+                    LOG_INFO(Render, "GFX WaitRegMem on VO label addr={:#x} waiting for flip",
+                             reinterpret_cast<uintptr_t>(wait_addr));
+                    Common::Log::Flush();
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
