@@ -860,7 +860,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                              reinterpret_cast<uintptr_t>(wait_addr));
                     Common::Log::Flush();
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
+                    // Fall through to yield path even if WaitVoLabel returned via timeout,
+                    // so the coroutine yields and GPU thread can process flip commands
+                    // stuck in the command_queue.
                 }
                 auto wr_start = std::chrono::steady_clock::now();
                 bool wr_warned = false;

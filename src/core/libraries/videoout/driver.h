@@ -54,17 +54,28 @@ struct VideoOutPort {
 
     void WaitVoLabel(auto&& pred) {
         std::unique_lock lk{vo_mutex};
-        auto wr_start = std::chrono::steady_clock::now();
+        const auto wr_start = std::chrono::steady_clock::now();
         bool wr_warned = false;
         while (!pred()) {
-            if (vo_cv.wait_for(lk, std::chrono::milliseconds(500)) == std::cv_status::timeout) {
-                if (!wr_warned) {
-                    auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          std::chrono::steady_clock::now() - wr_start)
-                                          .count();
-                    LOG_WARNING(Lib_VideoOut, "WaitVoLabel waiting for {}ms", wr_elapsed);
-                    wr_warned = true;
-                }
+            vo_cv.wait_for(lk, std::chrono::milliseconds(50));
+            if (pred()) {
+                break;
+            }
+            const auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now() - wr_start)
+                                        .count();
+            if (!wr_warned && wr_elapsed >= 500) {
+                LOG_WARNING(Lib_VideoOut, "WaitVoLabel waiting for {}ms labels=[{} {} {} {}]",
+                            wr_elapsed, buffer_labels[0], buffer_labels[1], buffer_labels[2],
+                            buffer_labels[3]);
+                wr_warned = true;
+            }
+            if (wr_elapsed >= 1000) {
+                LOG_WARNING(Lib_VideoOut,
+                            "WaitVoLabel timed out after 1000ms, falling through; "
+                            "labels=[{} {} {} {}]",
+                            buffer_labels[0], buffer_labels[1], buffer_labels[2], buffer_labels[3]);
+                break;
             }
         }
     }
