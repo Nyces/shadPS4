@@ -11,7 +11,7 @@
 
 namespace Vulkan {
 
-std::mutex Scheduler::submit_mutex;
+std::recursive_mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance)
     : instance{instance}, master_semaphore{instance}, command_pool{instance, &master_semaphore} {
@@ -127,9 +127,16 @@ void Scheduler::Wait(u64 tick) {
 void Scheduler::PopPendingOperations() {
     std::unique_lock lk(priority_pending_ops_mutex);
     master_semaphore.Refresh();
+    u32 op_index = 0;
     while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
+        LOG_INFO(Render_Vulkan, "PopPendingOperations before callback[{}] gpu_tick={} remaining={}",
+                 op_index, pending_ops.front().gpu_tick, pending_ops.size() - 1);
+        Common::Log::Flush();
         pending_ops.front().callback();
         pending_ops.pop();
+        LOG_INFO(Render_Vulkan, "PopPendingOperations after callback[{}]", op_index);
+        Common::Log::Flush();
+        ++op_index;
     }
 }
 
@@ -155,12 +162,13 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
     const u64 signal_value = master_semaphore.NextTick();
     LOG_INFO(Render_Vulkan,
              "Scheduler::SubmitExecution start signal_tick={} current={} num_wait={} num_signal={}",
              signal_value, CurrentTick(), info.num_wait_semas, info.num_signal_semas);
     Common::Log::Flush();
+
+    std::unique_lock lk{submit_mutex};
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -210,11 +218,26 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
              signal_value, vk::to_string(submit_result), master_semaphore.KnownGpuTick());
     Common::Log::Flush();
 
+    // Release submit_mutex before Refresh/Allocate/PopPendingOperations to avoid
+    // deadlock if a deferred callback re-enters SubmitExecution on the same thread.
+    lk.unlock();
+
+    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution post-submit Refresh signal_tick={}",
+             signal_value);
     master_semaphore.Refresh();
+
+    LOG_INFO(Render_Vulkan,
+             "Scheduler::SubmitExecution AllocateWorkerCommandBuffers signal_tick={}",
+             signal_value);
     AllocateWorkerCommandBuffers();
 
+    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution PopPendingOperations signal_tick={}",
+             signal_value);
+    Common::Log::Flush();
     // Apply pending operations
     PopPendingOperations();
+    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution done signal_tick={}", signal_value);
+    Common::Log::Flush();
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
