@@ -859,10 +859,10 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     LOG_INFO(Render, "GFX WaitRegMem on VO label addr={:#x} waiting for flip",
                              reinterpret_cast<uintptr_t>(wait_addr));
                     Common::Log::Flush();
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    // Fall through to yield path even if WaitVoLabel returned via timeout,
-                    // so the coroutine yields and GPU thread can process flip commands
-                    // stuck in the command_queue.
+                    // Do not call WaitVoLabel here — it blocks the thread on a condition
+                    // variable, preventing ProcessCommands() from running and processing
+                    // flip commands in command_queue. Fall through to the YIELD_GFX path
+                    // which uses co_yield to suspend the coroutine instead.
                 }
                 auto wr_start = std::chrono::steady_clock::now();
                 bool wr_warned = false;
@@ -886,9 +886,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
                 RESUME_GFX(task);
 
+                auto ib_start = std::chrono::steady_clock::now();
+                bool ib_warned = false;
                 while (!task.handle.done()) {
                     YIELD_GFX();
                     RESUME_GFX(task);
+                    if (!ib_warned) {
+                        auto ib_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - ib_start)
+                                              .count();
+                        if (ib_elapsed >= 500) {
+                            LOG_WARNING(Render, "GFX IndirectBuffer waiting for {}ms", ib_elapsed);
+                            ib_warned = true;
+                        }
+                    }
                 }
                 break;
             }
@@ -897,8 +908,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
+                auto wce_start = std::chrono::steady_clock::now();
+                bool wce_warned = false;
                 while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
                     RESUME_GFX(ce_task);
+                    if (!wce_warned) {
+                        auto wce_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::steady_clock::now() - wce_start)
+                                               .count();
+                        if (wce_elapsed >= 500) {
+                            LOG_WARNING(Render, "GFX WaitOnCeCounter waiting for {}ms",
+                                        wce_elapsed);
+                            wce_warned = true;
+                        }
+                    }
                 }
                 break;
             }
