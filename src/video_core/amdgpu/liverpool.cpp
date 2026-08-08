@@ -97,8 +97,35 @@ void Liverpool::Process(std::stop_token stoken) {
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
-            Common::CondvarWait(submit_cv, lk, stoken,
-                                [this] { return num_commands || num_submits || submit_done; });
+            bool cv_warned = false;
+            const auto cv_start = std::chrono::steady_clock::now();
+            while (!stoken.stop_requested()) {
+                const bool pred = num_commands || num_submits || submit_done;
+                if (pred) {
+                    break;
+                }
+                const auto cv_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            std::chrono::steady_clock::now() - cv_start)
+                                            .count();
+                if (!cv_warned && cv_elapsed >= 500) {
+                    LOG_WARNING(Render,
+                                "Liverpool::Process submit_cv waiting for {}ms num_commands={} "
+                                "num_submits={} submit_done={} mapped_queues={}",
+                                cv_elapsed, num_commands.load(), num_submits.load(),
+                                submit_done.load(), num_mapped_queues);
+                    for (u32 q = 0; q < num_mapped_queues; ++q) {
+                        auto& qd = mapped_queues[q];
+                        std::scoped_lock lkq{qd.m_access};
+                        LOG_WARNING(Render, "  queue[{}] submits={} front_done={}", q,
+                                    qd.submits.size(),
+                                    qd.submits.empty() ? false : qd.submits.front().done());
+                    }
+                    Common::Log::Flush();
+                    cv_warned = true;
+                }
+                submit_cv.wait_for(lk, stoken, std::chrono::milliseconds(100),
+                                   [this] { return num_commands || num_submits || submit_done; });
+            }
         }
         if (stoken.stop_requested()) {
             break;
@@ -124,8 +151,9 @@ void Liverpool::Process(std::stop_token stoken) {
                 task = queue.submits.front();
             }
             task.resume();
+            const bool resumed_done = task.done();
 
-            if (task.done()) {
+            if (resumed_done) {
                 task.destroy();
 
                 std::scoped_lock lock{queue.m_access};
@@ -716,9 +744,6 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
                     ASSERT(event_eos->size == 1);
                     if (rasterizer) {
-                        LOG_INFO(Render, "EventWriteEos GdsStore gds_index={} calling Finish",
-                                 event_eos->gds_index.Value());
-                        Common::Log::Flush();
                         rasterizer->Finish();
                         const u32 value = rasterizer->ReadDataFromGds(event_eos->gds_index);
                         *event_eos->Address() = value;

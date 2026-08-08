@@ -111,11 +111,6 @@ void AjmInstance::ExecuteJob(AjmJob& job) {
     auto out_size = out_buf.Size();
     u32 frames_decoded = 0;
 
-    LOG_WARNING(Lib_Ajm,
-                "ExecuteJob: instance={} input.buffer.size()={} output.buffers.size()={} "
-                "flags={:#x}",
-                job.instance_id, job.input.buffer.size(), job.output.buffers.size(), job.flags.raw);
-
     if (!job.input.buffer.empty()) {
         for (;;) {
             if (m_flags.gapless_loop && m_gapless.IsEnd()) {
@@ -139,16 +134,6 @@ void AjmInstance::ExecuteJob(AjmJob& job) {
                     job.output.p_result->result |= ORBIS_AJM_RESULT_PARTIAL_INPUT;
                 }
                 if (job.output.p_result->result != 0) {
-                    const auto input_consumed = in_size - in_buf.size();
-                    const auto output_written = out_size - out_buf.Size();
-                    LOG_WARNING(Lib_Ajm,
-                                "instance {} result={:#x} frames_decoded={} in_remain={} "
-                                "required_in={} out_remain={} required_out={} "
-                                "input_consumed={} output_written={} flags={:#x}",
-                                job.instance_id, job.output.p_result->result, frames_decoded,
-                                in_buf.size(), m_codec->GetMinimumInputSize(), out_buf.Size(),
-                                m_codec->GetNextFrameSize(m_gapless), input_consumed,
-                                output_written, job.flags.raw);
                     break;
                 }
             } else {
@@ -194,24 +179,6 @@ void AjmInstance::ExecuteJob(AjmJob& job) {
     if (job.output.p_codec_info != nullptr) {
         m_codec->GetInfo(job.output.p_codec_info);
     }
-
-    // Per-job summary so we can compare "working" (main menu BGM) vs
-    // "silent" (S4U Live BGM/voice) decode jobs. The sideband stream
-    // fields (input_consumed/output_written/frames_decoded) are what the
-    // nusc middleware reads to decide if usable PCM was produced; if they
-    // are zero while frames_decoded > 0, the game discards the batch and
-    // never submits the PCM to sceAudioOutOutput.
-    const auto input_consumed = in_size - in_buf.size();
-    const auto output_written = out_size - out_buf.Size();
-    LOG_INFO(Lib_Ajm,
-             "JobSummary inst={} frames={} in_total={} in_consumed={} "
-             "out_total={} out_written={} total_samples={} result={:#x} "
-             "p_result={} p_stream={} p_mframe={} p_format={} p_gapless={}",
-             job.instance_id, frames_decoded, in_size, input_consumed, out_size, output_written,
-             m_total_samples, job.output.p_result ? job.output.p_result->result : 0u,
-             job.output.p_result != nullptr, job.output.p_stream != nullptr,
-             job.output.p_mframe != nullptr, job.output.p_format != nullptr,
-             job.output.p_gapless_decode != nullptr);
 }
 
 bool AjmInstance::HasEnoughSpace(const SparseOutputBuffer& output) const {

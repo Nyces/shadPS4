@@ -105,17 +105,12 @@ void Scheduler::Flush() {
 void Scheduler::Finish() {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
-    LOG_INFO(Render_Vulkan, "Scheduler::Finish presubmit_tick={} current={}", presubmit_tick,
-             CurrentTick());
-    Common::Log::Flush();
     SubmitInfo info{};
     SubmitExecution(info);
     Wait(presubmit_tick);
 }
 
 void Scheduler::Wait(u64 tick) {
-    LOG_INFO(Render_Vulkan, "Scheduler::Wait tick={} current={}", tick, CurrentTick());
-    Common::Log::Flush();
     if (tick >= master_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
@@ -127,16 +122,9 @@ void Scheduler::Wait(u64 tick) {
 void Scheduler::PopPendingOperations() {
     std::unique_lock lk(priority_pending_ops_mutex);
     master_semaphore.Refresh();
-    u32 op_index = 0;
     while (!pending_ops.empty() && master_semaphore.IsFree(pending_ops.front().gpu_tick)) {
-        LOG_INFO(Render_Vulkan, "PopPendingOperations before callback[{}] gpu_tick={} remaining={}",
-                 op_index, pending_ops.front().gpu_tick, pending_ops.size() - 1);
-        Common::Log::Flush();
         pending_ops.front().callback();
         pending_ops.pop();
-        LOG_INFO(Render_Vulkan, "PopPendingOperations after callback[{}]", op_index);
-        Common::Log::Flush();
-        ++op_index;
     }
 }
 
@@ -163,10 +151,6 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     const u64 signal_value = master_semaphore.NextTick();
-    LOG_INFO(Render_Vulkan,
-             "Scheduler::SubmitExecution start signal_tick={} current={} num_wait={} num_signal={}",
-             signal_value, CurrentTick(), info.num_wait_semas, info.num_signal_semas);
-    Common::Log::Flush();
 
     std::unique_lock lk{submit_mutex};
 
@@ -208,36 +192,17 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     };
 
     ImGui::Core::TextureManager::Submit();
-    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution calling vkQueueSubmit signal_tick={}",
-             signal_value);
-    Common::Log::Flush();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
-    LOG_INFO(Render_Vulkan,
-             "Scheduler::SubmitExecution submit done signal_tick={} result={} gpu_tick={}",
-             signal_value, vk::to_string(submit_result), master_semaphore.KnownGpuTick());
-    Common::Log::Flush();
 
     // Release submit_mutex before Refresh/Allocate/PopPendingOperations to avoid
     // deadlock if a deferred callback re-enters SubmitExecution on the same thread.
     lk.unlock();
 
-    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution post-submit Refresh signal_tick={}",
-             signal_value);
     master_semaphore.Refresh();
-
-    LOG_INFO(Render_Vulkan,
-             "Scheduler::SubmitExecution AllocateWorkerCommandBuffers signal_tick={}",
-             signal_value);
     AllocateWorkerCommandBuffers();
-
-    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution PopPendingOperations signal_tick={}",
-             signal_value);
-    Common::Log::Flush();
     // Apply pending operations
     PopPendingOperations();
-    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution done signal_tick={}", signal_value);
-    Common::Log::Flush();
 }
 
 void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {

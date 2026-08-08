@@ -69,12 +69,6 @@ void AjmContext::WorkerThread(std::stop_token stop) {
     Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
     while (!stop.stop_requested()) {
         auto batch = batch_queue.PopWait(stop);
-        const u32 pop_id = batch ? batch->id : 0u;
-        const bool pop_canceled =
-            batch ? bool(batch->canceled.load(std::memory_order_acquire)) : false;
-        const size_t pop_jobs = batch ? batch->jobs.size() : 0u;
-        LOG_INFO(Lib_Ajm, "WorkerPop batch={} valid={} canceled={} jobs={} (before ProcessBatch)",
-                 pop_id, batch != nullptr, pop_canceled, pop_jobs);
         if (batch != nullptr && !batch->canceled) {
             bool expected = false;
             batch->processed.compare_exchange_strong(expected, true);
@@ -85,13 +79,6 @@ void AjmContext::WorkerThread(std::stop_token stop) {
 }
 
 void AjmContext::ProcessBatch(u32 id, std::span<AjmJob> jobs) {
-    if (jobs.size() > 0) {
-        const auto& first = jobs.front();
-        LOG_INFO(Lib_Ajm, "ProcessBatch START batch={} jobs={} first_inst={} first_flags_raw={:#x}",
-                 id, jobs.size(), first.instance_id, first.flags.raw);
-    } else {
-        LOG_INFO(Lib_Ajm, "ProcessBatch START batch={} jobs=0", id);
-    }
     // Perform operation requested by control flags.
     for (auto& job : jobs) {
         LOG_TRACE(Lib_Ajm, "Processing job {} for instance {}. flags = {:#x}", id, job.instance_id,
@@ -227,13 +214,6 @@ int AjmContext::BatchStartBuffer(u8* p_batch, u32 batch_size, const int priority
                consumed_batch_ids.size() > ConsumedBatchRetainWindow) {
             const auto old_id = consumed_batch_ids.front();
             consumed_batch_ids.pop_front();
-            // Check again: a recent StartBuffer may have re-allocated the
-            // same numeric id for a brand-new batch (same slot_array index
-            // after a Destroy+Create cycle). In that case the new batch
-            // overrides the slot pointer so id still belongs to batches -
-            // but the caller has already re-issued it, so we MUST NOT
-            // Destroy blindly. We only Destroy if the pointer still has
-            // consumed==true (i.e. it really is our old batch).
             auto* p_old_batch = batches.Get(old_id);
             if (p_old_batch != nullptr && p_old_batch->get() != nullptr &&
                 (*p_old_batch)->consumed.load(std::memory_order_acquire)) {
@@ -241,10 +221,6 @@ int AjmContext::BatchStartBuffer(u8* p_batch, u32 batch_size, const int priority
                 ++trimmed;
             }
         }
-    }
-    if (trimmed > 0) {
-        LOG_INFO(Lib_Ajm, "BatchStartBuffer trimmed {} stale consumed batches before Create",
-                 trimmed);
     }
 
     std::optional<u32> batch_id;
