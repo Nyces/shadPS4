@@ -187,8 +187,20 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
         }
         case PM4ItOpcode::WaitOnDeCounterDiff: {
             const auto diff = it_body[0];
+            auto dec_start = std::chrono::steady_clock::now();
+            bool dec_warned = false;
             while ((cblock.de_count - cblock.ce_count) >= diff) {
                 YIELD_CE();
+                if (!dec_warned) {
+                    auto dec_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - dec_start)
+                                           .count();
+                    if (dec_elapsed >= 500) {
+                        LOG_WARNING(Render, "CE WaitOnDeCounterDiff waiting for {}ms (diff={})",
+                                    dec_elapsed, diff);
+                        dec_warned = true;
+                    }
+                }
             }
             break;
         }
@@ -788,8 +800,21 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (mem_semaphore->IsSignaling()) {
                     mem_semaphore->Signal();
                 } else {
+                    auto sem_start = std::chrono::steady_clock::now();
+                    bool sem_warned = false;
                     while (!mem_semaphore->Signaled()) {
                         YIELD_GFX();
+                        if (!sem_warned) {
+                            auto sem_elapsed =
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - sem_start)
+                                    .count();
+                            if (sem_elapsed >= 500) {
+                                LOG_WARNING(Render, "GFX MemSemaphore waiting for {}ms",
+                                            sem_elapsed);
+                                sem_warned = true;
+                            }
+                        }
                     }
                     mem_semaphore->Decrement();
                 }
@@ -822,8 +847,19 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
                     break;
                 }
+                auto wr_start = std::chrono::steady_clock::now();
+                bool wr_warned = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     YIELD_GFX();
+                    if (!wr_warned) {
+                        auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                              std::chrono::steady_clock::now() - wr_start)
+                                              .count();
+                        if (wr_elapsed >= 500) {
+                            LOG_WARNING(Render, "GFX WaitRegMem waiting for {}ms", wr_elapsed);
+                            wr_warned = true;
+                        }
+                    }
                 }
                 break;
             }
