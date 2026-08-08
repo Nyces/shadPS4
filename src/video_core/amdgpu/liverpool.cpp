@@ -716,6 +716,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (event_eos->command == PM4CmdEventWriteEos::Command::GdsStore) {
                     ASSERT(event_eos->size == 1);
                     if (rasterizer) {
+                        LOG_INFO(Render, "EventWriteEos GdsStore gds_index={} calling Finish",
+                                 event_eos->gds_index.Value());
+                        Common::Log::Flush();
                         rasterizer->Finish();
                         const u32 value = rasterizer->ReadDataFromGds(event_eos->gds_index);
                         *event_eos->Address() = value;
@@ -854,10 +857,18 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 // there are no other submits to yield to we can sleep the thread
                 // instead and allow other tasks to run.
                 const u64* wait_addr = wait_reg_mem->Address<u64*>();
+                const bool is_mem_space =
+                    wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+                const auto func = wait_reg_mem->function.Value();
+                const u32 ref_val = wait_reg_mem->ref;
+                const u32 mask_val = wait_reg_mem->mask;
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    LOG_INFO(Render, "GFX WaitRegMem on VO label addr={:#x} waiting for flip",
-                             reinterpret_cast<uintptr_t>(wait_addr));
+                    LOG_INFO(Render,
+                             "GFX WaitRegMem on VO label addr={:#x} ref={:#x} mask={:#x} func={} "
+                             "waiting for flip",
+                             reinterpret_cast<uintptr_t>(wait_addr), ref_val, mask_val,
+                             static_cast<u32>(func));
                     Common::Log::Flush();
                     // Do not call WaitVoLabel here — it blocks the thread on a condition
                     // variable, preventing ProcessCommands() from running and processing
@@ -867,13 +878,24 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 auto wr_start = std::chrono::steady_clock::now();
                 bool wr_warned = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    ProcessCommands();
                     YIELD_GFX();
                     if (!wr_warned) {
                         auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                               std::chrono::steady_clock::now() - wr_start)
                                               .count();
                         if (wr_elapsed >= 500) {
-                            LOG_WARNING(Render, "GFX WaitRegMem waiting for {}ms", wr_elapsed);
+                            const u32 cur_raw = is_mem_space ? *wait_reg_mem->Address<u32*>()
+                                                             : regs.reg_array[wait_reg_mem->Reg()];
+                            const u32 cur_masked = cur_raw & mask_val;
+                            LOG_WARNING(
+                                Render,
+                                "GFX WaitRegMem waiting for {}ms addr={:#x} space={} func={} "
+                                "ref={:#x} mask={:#x} cur_raw={:#x} cur_masked={:#x}",
+                                wr_elapsed, reinterpret_cast<uintptr_t>(wait_addr),
+                                is_mem_space ? "MEM" : "REG", static_cast<u32>(func), ref_val,
+                                mask_val, cur_raw, cur_masked);
+                            Common::Log::Flush();
                             wr_warned = true;
                         }
                     }
@@ -911,14 +933,20 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 auto wce_start = std::chrono::steady_clock::now();
                 bool wce_warned = false;
                 while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
+                    ProcessCommands();
                     RESUME_GFX(ce_task);
                     if (!wce_warned) {
                         auto wce_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::steady_clock::now() - wce_start)
                                                .count();
                         if (wce_elapsed >= 500) {
-                            LOG_WARNING(Render, "GFX WaitOnCeCounter waiting for {}ms",
-                                        wce_elapsed);
+                            LOG_WARNING(
+                                Render,
+                                "GFX WaitOnCeCounter waiting for {}ms ce_count={} de_count={} "
+                                "ce_task_done={}",
+                                wce_elapsed, cblock.ce_count, cblock.de_count,
+                                ce_task.handle.done());
+                            Common::Log::Flush();
                             wce_warned = true;
                         }
                     }
@@ -1212,8 +1240,36 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         case PM4ItOpcode::WaitRegMem: {
             const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
             ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+            const bool is_mem_space =
+                wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
+            const auto func = wait_reg_mem->function.Value();
+            const u32 ref_val = wait_reg_mem->ref;
+            const u32 mask_val = wait_reg_mem->mask;
+            const u64* wait_addr = wait_reg_mem->Address<u64*>();
+            auto wr_start = std::chrono::steady_clock::now();
+            bool wr_warned = false;
             while (!wait_reg_mem->Test(regs.reg_array)) {
+                ProcessCommands();
                 YIELD_ASC(vqid);
+                if (!wr_warned) {
+                    auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - wr_start)
+                                          .count();
+                    if (wr_elapsed >= 500) {
+                        const u32 cur_raw = is_mem_space ? *wait_reg_mem->Address<u32*>()
+                                                         : regs.reg_array[wait_reg_mem->Reg()];
+                        const u32 cur_masked = cur_raw & mask_val;
+                        LOG_WARNING(
+                            Render,
+                            "ASC WaitRegMem vqid={} waiting for {}ms addr={:#x} space={} func={} "
+                            "ref={:#x} mask={:#x} cur_raw={:#x} cur_masked={:#x}",
+                            vqid, wr_elapsed, reinterpret_cast<uintptr_t>(wait_addr),
+                            is_mem_space ? "MEM" : "REG", static_cast<u32>(func), ref_val, mask_val,
+                            cur_raw, cur_masked);
+                        Common::Log::Flush();
+                        wr_warned = true;
+                    }
+                }
             }
             break;
         }

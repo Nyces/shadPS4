@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "common/debug.h"
+#include "common/logging/log.h"
 #include "common/thread.h"
 #include "imgui/renderer/texture_manager.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
@@ -104,12 +105,17 @@ void Scheduler::Flush() {
 void Scheduler::Finish() {
     // When finishing, we need to wait for the submission to have executed on the device.
     const u64 presubmit_tick = CurrentTick();
+    LOG_INFO(Render_Vulkan, "Scheduler::Finish presubmit_tick={} current={}", presubmit_tick,
+             CurrentTick());
+    Common::Log::Flush();
     SubmitInfo info{};
     SubmitExecution(info);
     Wait(presubmit_tick);
 }
 
 void Scheduler::Wait(u64 tick) {
+    LOG_INFO(Render_Vulkan, "Scheduler::Wait tick={} current={}", tick, CurrentTick());
+    Common::Log::Flush();
     if (tick >= master_semaphore.CurrentTick()) {
         // Make sure we are not waiting for the current tick without signalling
         SubmitInfo info{};
@@ -151,6 +157,10 @@ void Scheduler::AllocateWorkerCommandBuffers() {
 void Scheduler::SubmitExecution(SubmitInfo& info) {
     std::scoped_lock lk{submit_mutex};
     const u64 signal_value = master_semaphore.NextTick();
+    LOG_INFO(Render_Vulkan,
+             "Scheduler::SubmitExecution start signal_tick={} current={} num_wait={} num_signal={}",
+             signal_value, CurrentTick(), info.num_wait_semas, info.num_signal_semas);
+    Common::Log::Flush();
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -190,8 +200,15 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     };
 
     ImGui::Core::TextureManager::Submit();
+    LOG_INFO(Render_Vulkan, "Scheduler::SubmitExecution calling vkQueueSubmit signal_tick={}",
+             signal_value);
+    Common::Log::Flush();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+    LOG_INFO(Render_Vulkan,
+             "Scheduler::SubmitExecution submit done signal_tick={} result={} gpu_tick={}",
+             signal_value, vk::to_string(submit_result), master_semaphore.KnownGpuTick());
+    Common::Log::Flush();
 
     master_semaphore.Refresh();
     AllocateWorkerCommandBuffers();
