@@ -25,6 +25,12 @@ I must also be honest, these changes rely on Vibe Coding. After actual testing, 
 
 Additionally, we fixed audio stuttering and latency issues in these two games, which may help with compatibility fixes for other games.
 
+Contact me：
+
+Bilibili：https://space.bilibili.com/3461562899630581
+
+TG：https://t.me/nny_mhua
+
 <h1 align="center">
   <br>
   <a href="https://shadps4.net/"><img src="https://github.com/shadps4-emu/shadPS4/blob/main/.github/shadps4.png" width="220"></a>
