@@ -4,7 +4,6 @@
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/decoder.h"
-#include "common/logging/log.h"
 #include "common/signal_context.h"
 #include "core/libraries/kernel/threads/exception.h"
 #include "core/signals.h"
@@ -69,7 +68,6 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     // Breakpoints almost certainly come from our asserts/unreachables, no need to log it again.
     if (code != EXCEPTION_BREAKPOINT) {
         LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
-        Common::Log::Flush();
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 

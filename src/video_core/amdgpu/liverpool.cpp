@@ -97,35 +97,8 @@ void Liverpool::Process(std::stop_token stoken) {
     while (!stoken.stop_requested()) {
         {
             std::unique_lock lk{submit_mutex};
-            bool cv_warned = false;
-            const auto cv_start = std::chrono::steady_clock::now();
-            while (!stoken.stop_requested()) {
-                const bool pred = num_commands || num_submits || submit_done;
-                if (pred) {
-                    break;
-                }
-                const auto cv_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            std::chrono::steady_clock::now() - cv_start)
-                                            .count();
-                if (!cv_warned && cv_elapsed >= 500) {
-                    LOG_WARNING(Render,
-                                "Liverpool::Process submit_cv waiting for {}ms num_commands={} "
-                                "num_submits={} submit_done={} mapped_queues={}",
-                                cv_elapsed, num_commands.load(), num_submits.load(),
-                                submit_done.load(), num_mapped_queues);
-                    for (u32 q = 0; q < num_mapped_queues; ++q) {
-                        auto& qd = mapped_queues[q];
-                        std::scoped_lock lkq{qd.m_access};
-                        LOG_WARNING(Render, "  queue[{}] submits={} front_done={}", q,
-                                    qd.submits.size(),
-                                    qd.submits.empty() ? false : qd.submits.front().done());
-                    }
-                    Common::Log::Flush();
-                    cv_warned = true;
-                }
-                submit_cv.wait_for(lk, stoken, std::chrono::milliseconds(100),
-                                   [this] { return num_commands || num_submits || submit_done; });
-            }
+            submit_cv.wait(lk, stoken,
+                           [this] { return num_commands || num_submits || submit_done; });
         }
         if (stoken.stop_requested()) {
             break;
@@ -240,20 +213,8 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
             }
             case PM4ItOpcode::WaitOnDeCounterDiff: {
                 const auto diff = it_body[0];
-                auto dec_start = std::chrono::steady_clock::now();
-                bool dec_warned = false;
                 while ((cblock.de_count - cblock.ce_count) >= diff) {
                     YIELD_CE();
-                    if (!dec_warned) {
-                        auto dec_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               std::chrono::steady_clock::now() - dec_start)
-                                               .count();
-                        if (dec_elapsed >= 500) {
-                            LOG_WARNING(Render, "CE WaitOnDeCounterDiff waiting for {}ms (diff={})",
-                                        dec_elapsed, diff);
-                            dec_warned = true;
-                        }
-                    }
                 }
                 break;
             }
@@ -939,41 +900,14 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 const u32 mask_val = wait_reg_mem->mask;
                 if (vo_port->IsVoLabel(wait_addr) &&
                     num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    LOG_INFO(Render,
-                             "GFX WaitRegMem on VO label addr={:#x} ref={:#x} mask={:#x} func={} "
-                             "waiting for flip",
-                             reinterpret_cast<uintptr_t>(wait_addr), ref_val, mask_val,
-                             static_cast<u32>(func));
-                    Common::Log::Flush();
                     // Do not call WaitVoLabel here — it blocks the thread on a condition
                     // variable, preventing ProcessCommands() from running and processing
                     // flip commands in command_queue. Fall through to the YIELD_GFX path
                     // which uses co_yield to suspend the coroutine instead.
                 }
-                auto wr_start = std::chrono::steady_clock::now();
-                bool wr_warned = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     ProcessCommands();
                     YIELD_GFX();
-                    if (!wr_warned) {
-                        auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              std::chrono::steady_clock::now() - wr_start)
-                                              .count();
-                        if (wr_elapsed >= 500) {
-                            const u32 cur_raw = is_mem_space ? *wait_reg_mem->Address<u32*>()
-                                                             : regs.reg_array[wait_reg_mem->Reg()];
-                            const u32 cur_masked = cur_raw & mask_val;
-                            LOG_WARNING(
-                                Render,
-                                "GFX WaitRegMem waiting for {}ms addr={:#x} space={} func={} "
-                                "ref={:#x} mask={:#x} cur_raw={:#x} cur_masked={:#x}",
-                                wr_elapsed, reinterpret_cast<uintptr_t>(wait_addr),
-                                is_mem_space ? "MEM" : "REG", static_cast<u32>(func), ref_val,
-                                mask_val, cur_raw, cur_masked);
-                            Common::Log::Flush();
-                            wr_warned = true;
-                        }
-                    }
                 }
                 break;
             }
@@ -983,20 +917,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, {});
                 RESUME_GFX(task);
 
-                auto ib_start = std::chrono::steady_clock::now();
-                bool ib_warned = false;
                 while (!task.handle.done()) {
                     YIELD_GFX();
                     RESUME_GFX(task);
-                    if (!ib_warned) {
-                        auto ib_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              std::chrono::steady_clock::now() - ib_start)
-                                              .count();
-                        if (ib_elapsed >= 500) {
-                            LOG_WARNING(Render, "GFX IndirectBuffer waiting for {}ms", ib_elapsed);
-                            ib_warned = true;
-                        }
-                    }
                 }
                 break;
             }
@@ -1005,26 +928,9 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 break;
             }
             case PM4ItOpcode::WaitOnCeCounter: {
-                auto wce_start = std::chrono::steady_clock::now();
-                bool wce_warned = false;
                 while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
                     ProcessCommands();
                     RESUME_GFX(ce_task);
-                    if (!wce_warned) {
-                        auto wce_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               std::chrono::steady_clock::now() - wce_start)
-                                               .count();
-                        if (wce_elapsed >= 500) {
-                            LOG_WARNING(
-                                Render,
-                                "GFX WaitOnCeCounter waiting for {}ms ce_count={} de_count={} "
-                                "ce_task_done={}",
-                                wce_elapsed, cblock.ce_count, cblock.de_count,
-                                ce_task.handle.done());
-                            Common::Log::Flush();
-                            wce_warned = true;
-                        }
-                    }
                 }
                 break;
             }
@@ -1349,36 +1255,9 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-                const bool is_mem_space =
-                    wait_reg_mem->mem_space.Value() == PM4CmdWaitRegMem::MemSpace::Memory;
-                const auto func = wait_reg_mem->function.Value();
-                const u32 ref_val = wait_reg_mem->ref;
-                const u32 mask_val = wait_reg_mem->mask;
-                const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                auto wr_start = std::chrono::steady_clock::now();
-                bool wr_warned = false;
                 while (!wait_reg_mem->Test(regs.reg_array)) {
                     ProcessCommands();
                     YIELD_ASC(vqid);
-                    if (!wr_warned) {
-                        auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                              std::chrono::steady_clock::now() - wr_start)
-                                              .count();
-                        if (wr_elapsed >= 500) {
-                            const u32 cur_raw = is_mem_space ? *wait_reg_mem->Address<u32*>()
-                                                             : regs.reg_array[wait_reg_mem->Reg()];
-                            const u32 cur_masked = cur_raw & mask_val;
-                            LOG_WARNING(Render,
-                                        "ASC WaitRegMem vqid={} waiting for {}ms addr={:#x} "
-                                        "space={} func={} "
-                                        "ref={:#x} mask={:#x} cur_raw={:#x} cur_masked={:#x}",
-                                        vqid, wr_elapsed, reinterpret_cast<uintptr_t>(wait_addr),
-                                        is_mem_space ? "MEM" : "REG", static_cast<u32>(func),
-                                        ref_val, mask_val, cur_raw, cur_masked);
-                            Common::Log::Flush();
-                            wr_warned = true;
-                        }
-                    }
                 }
                 break;
             }

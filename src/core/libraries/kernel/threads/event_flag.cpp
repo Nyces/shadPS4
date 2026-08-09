@@ -56,21 +56,7 @@ public:
         };
 
         if (infinitely) {
-            while (!waitFunc()) {
-                m_cond_var.wait_for(lock, std::chrono::milliseconds(500), waitFunc);
-                if (!waitFunc()) {
-                    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                          std::chrono::system_clock::now() - start)
-                                          .count();
-                    if (elapsed_ms % 5000 == 0 || elapsed_ms == 500) {
-                        LOG_WARNING(Kernel_Event,
-                                    "EventFlag '{}' still waiting after {}ms: bits={:#x} "
-                                    "pattern={:#x} mode={}",
-                                    m_name, elapsed_ms, m_bits, bits,
-                                    wait_mode == WaitMode::And ? "AND" : "OR");
-                    }
-                }
-            }
+            m_cond_var.wait(lock, waitFunc);
         } else {
             if (!m_cond_var.wait_for(lock, std::chrono::microseconds(micros), waitFunc)) {
                 if (result != nullptr) {
@@ -284,7 +270,7 @@ int PS4_SYSV_ABI sceKernelCancelEventFlag(OrbisKernelEventFlag ef, u64 setPatter
 }
 
 int PS4_SYSV_ABI sceKernelSetEventFlag(OrbisKernelEventFlag ef, u64 bitPattern) {
-    LOG_INFO(Kernel_Event, "called ef={} bitPattern={:#x}", fmt::ptr(ef), bitPattern);
+    LOG_TRACE(Kernel_Event, "called");
     if (ef == nullptr) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }

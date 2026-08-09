@@ -2,12 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <limits>
-#include "common/logging/log.h"
+#include "common/assert.h"
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
-
-#include <chrono>
-#include "common/assert.h"
 
 namespace Vulkan {
 
@@ -64,28 +61,11 @@ void MasterSemaphore::Wait(u64 tick) {
         .pValues = &tick,
     };
 
-    const auto ms_start = std::chrono::steady_clock::now();
-    bool ms_warned = false;
-    while (true) {
-        const vk::Result wait_result =
-            instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT_NS);
-        if (wait_result == vk::Result::eSuccess) {
-            break;
-        }
+    while (instance.GetDevice().waitSemaphores(&wait_info, WAIT_TIMEOUT_NS) !=
+           vk::Result::eSuccess) {
         Refresh();
         if (IsFree(tick)) {
             break;
-        }
-        const auto ms_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now() - ms_start)
-                                    .count();
-        if (!ms_warned) {
-            LOG_WARNING(Render_Vulkan,
-                        "MasterSemaphore waiting tick={} gpu={} current={} elapsed={}ms result={}",
-                        tick, KnownGpuTick(), CurrentTick(), ms_elapsed,
-                        vk::to_string(wait_result));
-            Common::Log::Flush();
-            ms_warned = true;
         }
     }
     Refresh();

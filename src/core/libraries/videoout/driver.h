@@ -4,11 +4,9 @@
 #pragma once
 
 #include "common/debug.h"
-#include "common/logging/log.h"
 #include "common/polyfill_thread.h"
 #include "core/libraries/videoout/video_out.h"
 
-#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <queue>
@@ -54,30 +52,7 @@ struct VideoOutPort {
 
     void WaitVoLabel(auto&& pred) {
         std::unique_lock lk{vo_mutex};
-        const auto wr_start = std::chrono::steady_clock::now();
-        bool wr_warned = false;
-        while (!pred()) {
-            vo_cv.wait_for(lk, std::chrono::milliseconds(50));
-            if (pred()) {
-                break;
-            }
-            const auto wr_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        std::chrono::steady_clock::now() - wr_start)
-                                        .count();
-            if (!wr_warned && wr_elapsed >= 500) {
-                LOG_WARNING(Lib_VideoOut, "WaitVoLabel waiting for {}ms labels=[{} {} {} {}]",
-                            wr_elapsed, buffer_labels[0], buffer_labels[1], buffer_labels[2],
-                            buffer_labels[3]);
-                wr_warned = true;
-            }
-            if (wr_elapsed >= 1000) {
-                LOG_WARNING(Lib_VideoOut,
-                            "WaitVoLabel timed out after 1000ms, falling through; "
-                            "labels=[{} {} {} {}]",
-                            buffer_labels[0], buffer_labels[1], buffer_labels[2], buffer_labels[3]);
-                break;
-            }
-        }
+        vo_cv.wait(lk, pred);
     }
 
     void SignalVoLabel() {

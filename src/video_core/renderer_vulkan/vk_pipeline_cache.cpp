@@ -323,33 +323,12 @@ const GraphicsPipeline* PipelineCache::GetGraphicsPipeline() {
     const auto [it, is_new] = graphics_pipelines.try_emplace(graphics_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<GraphicsPipelineKey>{}(graphics_key);
-        const auto hash_or = [&](u32 idx) {
-            return infos[idx] ? graphics_key.stage_hashes[idx] : size_t{0};
-        };
-        const auto yes = [](bool v) { return v ? "yes" : "no"; };
-        LOG_INFO(
-            Render_Vulkan,
-            "Compiling graphics pipeline {:#x}: prim={} cb={} samples={}/{} depth_clip={} "
-            "poly={} patch={} mrt_mask={:#x} logic_op={} stages=[V:{}( {}) L:{}( {}) H:{}( {}) "
-            "E:{}( {}) G:{}( {}) F:{}( {})]",
-            pipeline_hash, u32(graphics_key.prim_type), graphics_key.num_color_attachments,
-            graphics_key.num_samples, graphics_key.depth_samples,
-            yes(graphics_key.depth_clip_enable), u32(graphics_key.polygon_mode),
-            graphics_key.patch_control_points, graphics_key.mrt_mask, u32(graphics_key.logic_op),
-            yes(bool(infos[0])), hash_or(0), yes(bool(infos[1])), hash_or(1), yes(bool(infos[2])),
-            hash_or(2), yes(bool(infos[3])), hash_or(3), yes(bool(infos[4])), hash_or(4),
-            yes(bool(infos[5])), hash_or(5));
-        LOG_INFO(Render_Vulkan, "Graphics pipeline {:#x} starting Vk pipeline create...",
-                 pipeline_hash);
-        Common::Log::Flush();
+        LOG_INFO(Render_Vulkan, "Compiling graphics pipeline {:#x}", pipeline_hash);
 
         GraphicsPipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<GraphicsPipeline>(
             instance, scheduler, desc_heap, profile, graphics_key, *pipeline_cache, infos,
             runtime_infos, fetch_shader, modules, sdata, false);
-
-        LOG_INFO(Render_Vulkan, "Graphics pipeline {:#x} Vk pipeline create OK", pipeline_hash);
-        Common::Log::Flush();
 
         RegisterPipelineData(graphics_key, pipeline_hash, sdata);
         ++num_new_pipelines;
@@ -374,26 +353,12 @@ const ComputePipeline* PipelineCache::GetComputePipeline() {
     const auto [it, is_new] = compute_pipelines.try_emplace(compute_key);
     if (is_new) {
         const auto pipeline_hash = std::hash<ComputePipelineKey>{}(compute_key);
-        const auto& cs_pgm = liverpool->GetCsRegs();
-        const auto* cs_info = infos[0];
-        LOG_INFO(Render_Vulkan,
-                 "Compiling compute pipeline {:#x}: key_val={:#x} cs_hash={:#x} tgid=[{},{},{}] "
-                 "wg_size=[{},{},{}] shared_mem={} sgprs={} vgprs={} user_regs={}",
-                 pipeline_hash, compute_key.value, cs_info ? cs_info->pgm_hash : u64{0},
-                 cs_pgm.IsTgidEnabled(0), cs_pgm.IsTgidEnabled(1), cs_pgm.IsTgidEnabled(2),
-                 cs_pgm.num_thread_x.full, cs_pgm.num_thread_y.full, cs_pgm.num_thread_z.full,
-                 cs_pgm.SharedMemSize(), cs_pgm.settings.num_sgprs, cs_pgm.settings.num_vgprs * 4,
-                 cs_pgm.settings.num_user_regs);
-        LOG_INFO(Render_Vulkan, "Compute pipeline {:#x} starting Vk pipeline create...",
-                 pipeline_hash);
-        Common::Log::Flush();
+        LOG_INFO(Render_Vulkan, "Compiling compute pipeline {:#x}", pipeline_hash);
 
         ComputePipeline::SerializationSupport sdata{};
         it.value() = std::make_unique<ComputePipeline>(instance, scheduler, desc_heap, profile,
                                                        *pipeline_cache, compute_key, *infos[0],
                                                        modules[0], sdata, false);
-        LOG_INFO(Render_Vulkan, "Compute pipeline {:#x} Vk pipeline create OK", pipeline_hash);
-        Common::Log::Flush();
         RegisterPipelineData(compute_key, sdata);
         ++num_new_pipelines;
 
