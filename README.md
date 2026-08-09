@@ -25,7 +25,7 @@ I must also be honest, these changes rely on Vibe Coding. After actual testing, 
 
 Additionally, we fixed audio stuttering and latency issues in these two games, which may help with compatibility fixes for other games.
 
-Contact me：
+Contact me:
 
 Bilibili：https://space.bilibili.com/3461562899630581
 
