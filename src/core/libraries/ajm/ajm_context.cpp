@@ -214,13 +214,6 @@ int AjmContext::BatchStartBuffer(u8* p_batch, u32 batch_size, const int priority
                consumed_batch_ids.size() > ConsumedBatchRetainWindow) {
             const auto old_id = consumed_batch_ids.front();
             consumed_batch_ids.pop_front();
-            // Check again: a recent StartBuffer may have re-allocated the
-            // same numeric id for a brand-new batch (same slot_array index
-            // after a Destroy+Create cycle). In that case the new batch
-            // overrides the slot pointer so id still belongs to batches -
-            // but the caller has already re-issued it, so we MUST NOT
-            // Destroy blindly. We only Destroy if the pointer still has
-            // consumed==true (i.e. it really is our old batch).
             auto* p_old_batch = batches.Get(old_id);
             if (p_old_batch != nullptr && p_old_batch->get() != nullptr &&
                 (*p_old_batch)->consumed.load(std::memory_order_acquire)) {
@@ -280,6 +273,7 @@ s32 AjmContext::InstanceCreate(AjmCodecType codec_type, AjmInstanceFlags flags, 
     }
     *out_instance = opt_index.value() | (static_cast<u32>(codec_type) << 14);
 
+    LOG_INFO(Lib_Ajm, "instance = {}", *out_instance);
     return ORBIS_OK;
 }
 
