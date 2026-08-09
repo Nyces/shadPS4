@@ -3,6 +3,28 @@ SPDX-FileCopyrightText: 2026 shadPS4 Emulator Project
 SPDX-License-Identifier: GPL-2.0-or-later
 -->
 
+The modifications to this fork repository primarily target the two Idolmaster series games on the PS4 platform.
+
+THE IDOLM@STER: Platinum Stars (CUSA03628, CUSA05706)
+
+THE IDOLM@STER: Stella Stage (CUSA07753, CUSA09153)
+
+Current Status:
+
+✅️Platinum Stars is playable
+
+✅️Stella Stage is playable
+
+However, prolonged gameplay may result in some random texture rendering errors, but this does not affect normal gameplay.
+
+It is recommended to configure game-specific settings for these two games within the launcher, setting the readback mode to "Precise" in the experimental features section.
+
+Note: This may not support running some other games.
+
+I must also be honest, these changes rely on Vibe Coding. After actual testing, they successfully fixed the relevant bugs in these two games.
+
+Additionally, we fixed audio stuttering and latency issues in these two games, which may help with compatibility fixes for other games.
+
 <h1 align="center">
   <br>
   <a href="https://shadps4.net/"><img src="https://github.com/shadps4-emu/shadPS4/blob/main/.github/shadps4.png" width="220"></a>
