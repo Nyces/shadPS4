@@ -128,6 +128,10 @@ struct DynamicState {
 
     Viewports viewports{};
     Scissors scissors{};
+    Viewports logged_viewports{};
+    Scissors logged_scissors{};
+    bool has_logged_viewports{};
+    bool has_logged_scissors{};
 
     bool depth_test_enabled{};
     bool depth_write_enabled{};
@@ -449,7 +453,9 @@ private:
     std::condition_variable_any priority_pending_ops_cv;
     std::jthread priority_pending_ops_thread;
     RenderState render_state;
+    RenderState logged_render_state;
     bool is_rendering = false;
+    bool has_logged_render_state = false;
     tracy::VkCtxScope* profiler_scope{};
 };
 
