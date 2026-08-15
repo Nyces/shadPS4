@@ -854,6 +854,17 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const auto mip = image_view.info.range.base.level;
 
         const auto& col_buf = regs.color_buffers[cb];
+        const auto& extent_hint = liverpool->last_cb_extent[cb];
+        if ((image->info.size.width == 1920 && image->info.size.height == 1080) ||
+            (image->info.size.width == 3840 && image->info.size.height == 2160)) {
+            LOG_INFO(
+                Render_Vulkan,
+                "[RES] CB{} image: address={:#x}, hint={}x{} valid={}, pitch={}, regHeight={}, "
+                "image={}x{}, mip={}",
+                cb, col_buf.Address(), extent_hint.width, extent_hint.height, extent_hint.Valid(),
+                col_buf.Pitch(), col_buf.Height(), image->info.size.width, image->info.size.height,
+                mip);
+        }
         const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
         texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
 
