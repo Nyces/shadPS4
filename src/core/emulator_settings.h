@@ -1,4 +1,4 @@
-﻿// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+// SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
@@ -248,7 +248,8 @@ struct LogSettings {
     Setting<std::string> flush_level{""};
     Setting<u32> max_skip_duration{5'000};
     Setting<bool> separate{false}; // specific
-    Setting<unsigned long long> size_limit{100_MB};
+    // 0 = unlimited (see Common::Log::LogFileSink::UNLIMITED_SIZE)
+    Setting<unsigned long long> size_limit{0};
     Setting<bool> skip_duplicate{true};
     Setting<bool> sync{true};
 #ifdef _WIN32
