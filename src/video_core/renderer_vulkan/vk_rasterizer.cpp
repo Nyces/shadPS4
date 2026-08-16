@@ -906,6 +906,16 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& image_view = texture_cache.FindDepthTarget(image_id, desc);
         auto& image = texture_cache.GetImage(image_id);
+        if ((image.info.size.width == 1920 && image.info.size.height == 1080) ||
+            (image.info.size.width == 3840 && image.info.size.height == 2160)) {
+            LOG_INFO(Render_Vulkan,
+                     "[RES] DB image: address={:#x}, hint={}x{} valid={}, pitch={}, regHeight={}, "
+                     "image={}x{}",
+                     regs.depth_buffer.DepthAddress(), liverpool->last_db_extent.width,
+                     liverpool->last_db_extent.height, liverpool->last_db_extent.Valid(),
+                     regs.depth_buffer.Pitch(), regs.depth_buffer.Height(), image.info.size.width,
+                     image.info.size.height);
+        }
 
         const auto slice = image_view.info.range.base.layer;
         const bool is_depth_clear = regs.depth_render_control.depth_clear_enable ||

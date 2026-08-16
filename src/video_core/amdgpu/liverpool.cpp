@@ -434,7 +434,13 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (header->type3.count == 8) {
                         ASSERT_MSG(payload[20] == 0xc0001000,
                                    "NOP hint is missing in DB setup sequence");
+                        const auto previous_db_extent = last_db_extent;
                         last_db_extent.raw = payload[21];
+                        if (previous_db_extent.raw != last_db_extent.raw) {
+                            LOG_INFO(Render, "[RES] DB hint: {}x{}, raw={:#x}",
+                                     last_db_extent.width, last_db_extent.height,
+                                     last_db_extent.raw);
+                        }
                     } else {
                         last_db_extent.raw = 0;
                     }
