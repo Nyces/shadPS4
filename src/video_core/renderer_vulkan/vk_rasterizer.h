@@ -147,6 +147,13 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+
+    // True 4K framebuffer enlargement: when the game sets a viewport larger than the
+    // bound render target (e.g. 4K viewport on a 1080p target), we enlarge the target
+    // image and expand the scissor so the scene renders natively at the viewport size.
+    mutable bool resolution_upscaled{};
+    mutable u32 render_target_width{};
+    mutable u32 render_target_height{};
 };
 
 } // namespace Vulkan
