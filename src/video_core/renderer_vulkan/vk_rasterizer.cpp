@@ -910,11 +910,25 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         state.color_attachments[cb] = {};
     }
 
+    const bool color_is_4k =
+        state.num_color_attachments > 0 && state.width == 3840 && state.height == 2160;
+
     if (auto image_id = db_desc.first; image_id) {
         auto& desc = db_desc.second;
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& image_view = texture_cache.FindDepthTarget(image_id, desc);
         auto& image = texture_cache.GetImage(image_id);
+        if (color_is_4k && image.info.size.width == 1920 && image.info.size.height == 1080) {
+            LOG_INFO(Render_Vulkan,
+                     "[RES] DB skip: dropping 1080p depth {:#x} from 4K color pass to keep "
+                     "render area {}x{}",
+                     regs.depth_buffer.DepthAddress(), state.width, state.height);
+            state.depth_stencil_attachment = {};
+            if (state.num_layers == std::numeric_limits<u16>::max()) {
+                state.num_layers = 1;
+            }
+            return state;
+        }
         if ((image.info.size.width == 1920 && image.info.size.height == 1080) ||
             (image.info.size.width == 3840 && image.info.size.height == 2160)) {
             LOG_INFO(Render_Vulkan,
