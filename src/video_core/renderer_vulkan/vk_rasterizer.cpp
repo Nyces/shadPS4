@@ -114,6 +114,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = liverpool->regs;
     resolution_upscaled = false;
+    push_data_upscaled = false;
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
     }
@@ -149,6 +150,22 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             continue;
         }
         const auto hint = get_scaled_hint(liverpool->last_cb_extent[cb]);
+        // When the game submits a 4K render target (via patch) but the composite
+        // blit still uses a 1080p viewport with clipping disabled, the upscaling
+        // shader reads push_data.xscale/yscale (still 1080p values) to convert
+        // window coords to NDC. Mark this so we can scale scissor and push data.
+        if (hint.width == 3840 && hint.height == 2160 && regs.IsClipDisabled()) {
+            const auto& vp = regs.viewports[0];
+            const u32 vp_width = static_cast<u32>(std::abs(vp.xscale) * 2.0f);
+            const u32 vp_height = static_cast<u32>(std::abs(vp.yscale) * 2.0f);
+            if (vp_width <= 1920 && vp_height <= 1080) {
+                LOG_INFO(Render_Vulkan,
+                         "[RES] 4K target with 1080p clip-disabled viewport: "
+                         "hint={}x{}, vp={}x{}",
+                         hint.width, hint.height, vp_width, vp_height);
+                push_data_upscaled = true;
+            }
+        }
         std::construct_at(&desc, col_buf, hint);
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
@@ -476,6 +493,15 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    // When the game submits a 4K render target but the composite blit still uses a
+    // 1080p viewport with clipping disabled, the upscaling shader converts window
+    // coords to NDC via push_data.xscale/yscale (see ConvertPositionToClipSpace).
+    // Scale them by 2x so the blit quad covers the whole 4K target instead of the
+    // top-left 1080p corner.
+    if (push_data_upscaled) {
+        push_data.xscale *= 2.0f;
+        push_data.yscale *= 2.0f;
+    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -1343,8 +1369,9 @@ void Rasterizer::UpdateViewportScissorState() const {
         }
         // When the render target was enlarged to the viewport size, expand the scissor
         // to cover the full target; otherwise the game's 1080p scissor would clip the
-        // 4K scene back down to the top-left corner.
-        if (resolution_upscaled || vp_is_1080p_fullscreen) {
+        // 4K scene back down to the top-left corner. push_data_upscaled covers the
+        // clip-disabled composite blit where the viewport stays at the full window size.
+        if (resolution_upscaled || vp_is_1080p_fullscreen || push_data_upscaled) {
             vp_scsr.top_left_x = 0;
             vp_scsr.top_left_y = 0;
             vp_scsr.bottom_right_x = static_cast<s16>(render_target_width);

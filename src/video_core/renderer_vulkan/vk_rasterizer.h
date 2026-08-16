@@ -152,6 +152,10 @@ private:
     // bound render target (e.g. 4K viewport on a 1080p target), we enlarge the target
     // image and expand the scissor so the scene renders natively at the viewport size.
     mutable bool resolution_upscaled{};
+    // Set when the game submits a 4K render target (via patch) but the composite blit
+    // still uses a 1080p viewport with clipping disabled. The upscaling shader converts
+    // window coords to NDC using push_data.xscale/yscale, so those need scaling too.
+    mutable bool push_data_upscaled{};
     mutable u32 render_target_width{};
     mutable u32 render_target_height{};
 };
