@@ -15,6 +15,7 @@
 #include "video_core/texture_cache/texture_cache.h"
 
 #include <cmath>
+#include <unordered_set>
 
 #ifdef MemoryBarrier
 #undef MemoryBarrier
@@ -813,6 +814,18 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
+
+            // res diagnostic: report the sampled texture sizes to see whether the final
+            // composite reads the (enlarged) 4K scene buffer or a 1080p view of it.
+            static std::unordered_set<u64> logged_sampled_textures;
+            const u64 tex_key = (static_cast<u64>(image.info.guest_address) << 32) |
+                                (static_cast<u64>(image.info.size.width) << 16) |
+                                image.info.size.height;
+            if (logged_sampled_textures.insert(tex_key).second) {
+                LOG_INFO(Render_Vulkan, "[RES] sampled texture: addr={:#x} size={}x{} fmt={}",
+                         image.info.guest_address, image.info.size.width, image.info.size.height,
+                         vk::to_string(image.info.pixel_format));
+            }
 
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
