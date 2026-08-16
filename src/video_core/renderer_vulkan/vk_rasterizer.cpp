@@ -209,6 +209,21 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    {
+        const auto& key = pipeline->GetGraphicsKey();
+        const auto& vp = regs.viewports[0];
+        LOG_INFO(Render_Vulkan,
+                 "[RES] draw: prim={} idx={} inst={} cb0={:#x} db={:#x} vp=({},{},{},{}) "
+                 "scsr={}x{} clip={} vs={:#x} ps={:#x}",
+                 static_cast<u32>(regs.primitive_type), regs.num_indices,
+                 regs.num_instances.NumInstances(), regs.color_buffers[0].Address(),
+                 regs.depth_buffer.DepthAddress(), vp.xoffset, vp.yoffset, vp.xscale, vp.yscale,
+                 regs.screen_scissor.bottom_right_x, regs.screen_scissor.bottom_right_y,
+                 regs.IsClipDisabled(),
+                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)],
+                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)]);
+    }
+
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;

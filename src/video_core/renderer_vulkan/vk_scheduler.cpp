@@ -9,6 +9,8 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
+#include <string>
+
 namespace Vulkan {
 
 std::recursive_mutex Scheduler::submit_mutex;
@@ -41,11 +43,16 @@ void Scheduler::BeginRendering(const RenderState& new_state) {
         logged_render_state.num_color_attachments != new_state.num_color_attachments ||
         logged_depth.has_depth != new_depth.has_depth ||
         logged_depth.has_stencil != new_depth.has_stencil) {
+        std::string clear_flags;
+        for (u32 i = 0; i < new_state.num_color_attachments; ++i) {
+            clear_flags += new_state.color_attachments[i].is_clear ? "C" : "L";
+        }
         LOG_INFO(Render_Vulkan,
-                 "[RES] render target: {}x{}, layers={}, colors={}, depth={}, stencil={}",
+                 "[RES] render target: {}x{}, layers={}, colors={}, depth={}, stencil={}, "
+                 "load={}",
                  new_state.width, new_state.height, new_state.num_layers,
                  new_state.num_color_attachments, new_state.depth_stencil_attachment.has_depth,
-                 new_state.depth_stencil_attachment.has_stencil);
+                 new_state.depth_stencil_attachment.has_stencil, clear_flags);
         logged_render_state = new_state;
         has_logged_render_state = true;
     }
