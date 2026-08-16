@@ -1311,6 +1311,23 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.height = yscale * 2.0f;
         }
 
+        // When the game submits a 1080p fullscreen viewport while the bound render
+        // target was enlarged to 4K (e.g. the composite blit that upscales the scene
+        // to the 4K output), scale the viewport up to cover the whole 4K target.
+        // Otherwise the scene is drawn only in the top-left 1080p corner of the
+        // enlarged target, leaving the rest of the 4K framebuffer empty.
+        const bool vp_is_1080p_fullscreen =
+            render_target_width == 3840 && render_target_height == 2160 &&
+            std::abs(viewport.width) <= 1920.f && std::abs(viewport.height) <= 1080.f;
+        if (vp_is_1080p_fullscreen) {
+            const bool flip_y = viewport.height < 0.f;
+            viewport.x = 0.f;
+            viewport.y = flip_y ? static_cast<float>(render_target_height) : 0.f;
+            viewport.width = static_cast<float>(render_target_width);
+            viewport.height = flip_y ? -static_cast<float>(render_target_height)
+                                     : static_cast<float>(render_target_height);
+        }
+
         viewports.push_back(viewport);
 
         auto vp_scsr = scsr;
@@ -1327,7 +1344,7 @@ void Rasterizer::UpdateViewportScissorState() const {
         // When the render target was enlarged to the viewport size, expand the scissor
         // to cover the full target; otherwise the game's 1080p scissor would clip the
         // 4K scene back down to the top-left corner.
-        if (resolution_upscaled) {
+        if (resolution_upscaled || vp_is_1080p_fullscreen) {
             vp_scsr.top_left_x = 0;
             vp_scsr.top_left_y = 0;
             vp_scsr.bottom_right_x = static_cast<s16>(render_target_width);
