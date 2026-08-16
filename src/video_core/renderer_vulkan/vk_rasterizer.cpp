@@ -135,6 +135,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& hint = liverpool->last_db_extent;
+        if (hint.width == 1920 && hint.height == 1080) {
+            LOG_INFO(Render_Vulkan,
+                     "[RES] DB bind: address={:#x}, hint={}x{}, pitch={}, regHeight={}, "
+                     "screenScissor={}x{}, cb0={:#x}",
+                     regs.depth_buffer.DepthAddress(), hint.width, hint.height,
+                     regs.depth_buffer.Pitch(), regs.depth_buffer.Height(),
+                     regs.screen_scissor.bottom_right_x, regs.screen_scissor.bottom_right_y,
+                     regs.color_buffers[0].Address());
+        }
         auto& [image_id, desc] = db_desc;
         std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
                           htile_address, hint);
