@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cmath>
+
 #include "common/debug.h"
 #include "core/emulator_settings.h"
 #include "core/memory.h"
@@ -110,6 +112,10 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = liverpool->regs;
+    output_upscaled = false;
+    upscale_x = 1.0f;
+    upscale_y = 1.0f;
+    AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
     }
@@ -129,12 +135,42 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+
+        // A registered VideoOut surface defines the presentation window. When it is
+        // larger than the window the game renders with (its viewport), the game was
+        // built for a smaller output and only its buffer got enlarged (e.g. by a
+        // resolution patch). Record the ratio to scale the whole pass up to the full
+        // surface instead of leaving it cropped in the top-left corner.
+        if (image.usage.vo_surface && regs.viewport_control.xscale_enable &&
+            regs.viewport_control.yscale_enable) {
+            const auto& vp = regs.viewports[0];
+            const auto window_width = std::abs(vp.xscale) * 2.0f;
+            const auto window_height = std::abs(vp.yscale) * 2.0f;
+            if (window_width > 0.f && window_height > 0.f) {
+                const auto ratio_x = float(image.info.size.width) / window_width;
+                const auto ratio_y = float(image.info.size.height) / window_height;
+                if (ratio_x > 1.001f || ratio_y > 1.001f) {
+                    upscale_x = std::max(upscale_x, std::max(ratio_x, 1.0f));
+                    upscale_y = std::max(upscale_y, std::max(ratio_y, 1.0f));
+                    output_upscaled = true;
+                    vo_extent.width = std::max(vo_extent.width, u16(image.info.size.width));
+                    vo_extent.height = std::max(vo_extent.height, u16(image.info.size.height));
+                }
+            }
+        }
     }
 
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
         (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
-        const auto& hint = liverpool->last_db_extent;
+        auto hint = liverpool->last_db_extent;
+        if (vo_extent.Valid() && (vo_extent.width > hint.width || vo_extent.height > hint.height)) {
+            // The game still allocates the depth buffer for its original window size.
+            // Enlarge it to match the VideoOut target, otherwise the smaller depth
+            // attachment would shrink the framebuffer back to the old resolution and
+            // clip the upscaled pass to its top-left corner.
+            hint = vo_extent;
+        }
         auto& [image_id, desc] = db_desc;
         std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
                           htile_address, hint);
@@ -412,6 +448,15 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    if (output_upscaled) {
+        // With clipping disabled the shader converts window coordinates to NDC via
+        // push data (see ConvertPositionToClipSpace). Scale it along with the pass
+        // so such blits cover the enlarged VideoOut surface.
+        push_data.xoffset *= upscale_x;
+        push_data.xscale *= upscale_x;
+        push_data.yoffset *= upscale_y;
+        push_data.yscale *= upscale_y;
+    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -1196,6 +1241,13 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
+            if (output_upscaled) {
+                // Scale the viewport together with the enlarged VideoOut target.
+                viewport.x *= upscale_x;
+                viewport.y *= upscale_y;
+                viewport.width *= upscale_x;
+                viewport.height *= upscale_y;
+            }
         }
 
         viewports.push_back(viewport);
@@ -1210,6 +1262,14 @@ void Rasterizer::UpdateViewportScissorState() const {
                                               regs.viewport_scissors[i].bottom_right_x);
             vp_scsr.bottom_right_y = std::min(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_y),
                                               regs.viewport_scissors[i].bottom_right_y);
+        }
+        if (output_upscaled) {
+            // Scale the scissor with the pass; otherwise the game's old window
+            // rectangle would clip the upscaled render to the top-left corner.
+            vp_scsr.top_left_x = s16(std::lround(vp_scsr.top_left_x * upscale_x));
+            vp_scsr.top_left_y = s16(std::lround(vp_scsr.top_left_y * upscale_y));
+            vp_scsr.bottom_right_x = s16(std::lround(vp_scsr.bottom_right_x * upscale_x));
+            vp_scsr.bottom_right_y = s16(std::lround(vp_scsr.bottom_right_y * upscale_y));
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},

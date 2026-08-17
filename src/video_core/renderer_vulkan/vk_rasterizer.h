@@ -147,6 +147,15 @@ private:
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
+
+    // VideoOut output auto-fit: set when a draw targets a registered VideoOut surface
+    // larger than the window the game renders with (e.g. a resolution patch enlarged
+    // the output buffer while the game still submits its original viewport). The pass
+    // is scaled by the recorded ratio so the frame fills the whole surface. Without
+    // such a patch the ratio stays 1.0 and the behavior is unchanged.
+    mutable bool output_upscaled{};
+    mutable float upscale_x{1.0f};
+    mutable float upscale_y{1.0f};
 };
 
 } // namespace Vulkan
