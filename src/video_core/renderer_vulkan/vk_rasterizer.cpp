@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <cmath>
+#include <unordered_set>
 
 #include "common/debug.h"
 #include "core/emulator_settings.h"
@@ -137,15 +138,19 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image.binding.is_target = 1u;
 
         // A registered VideoOut surface defines the presentation window. When it is
-        // larger than the window the game renders with (its viewport), the game was
-        // built for a smaller output and only its buffer got enlarged (e.g. by a
-        // resolution patch). Record the ratio to scale the whole pass up to the full
-        // surface instead of leaving it cropped in the top-left corner.
-        if (image.usage.vo_surface && regs.viewport_control.xscale_enable &&
-            regs.viewport_control.yscale_enable) {
+        // larger than the window the game renders with, the game was built for a
+        // smaller output and only its buffer got enlarged (e.g. by a resolution
+        // patch). Record the ratio to scale the whole pass up to the full surface
+        // instead of leaving it cropped in the top-left corner. The window is taken
+        // as the larger of the viewport and the screen scissor: RectList blits often
+        // submit screen-space vertices with the viewport transform disabled, where
+        // only the scissor reflects the window the game was built for.
+        if (image.usage.vo_surface) {
             const auto& vp = regs.viewports[0];
-            const auto window_width = std::abs(vp.xscale) * 2.0f;
-            const auto window_height = std::abs(vp.yscale) * 2.0f;
+            const auto scsr_w = float(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x));
+            const auto scsr_h = float(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y));
+            const auto window_width = std::max(std::abs(vp.xscale) * 2.0f, scsr_w);
+            const auto window_height = std::max(std::abs(vp.yscale) * 2.0f, scsr_h);
             if (window_width > 0.f && window_height > 0.f) {
                 const auto ratio_x = float(image.info.size.width) / window_width;
                 const auto ratio_y = float(image.info.size.height) / window_height;
@@ -155,6 +160,18 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                     output_upscaled = true;
                     vo_extent.width = std::max(vo_extent.width, u16(image.info.size.width));
                     vo_extent.height = std::max(vo_extent.height, u16(image.info.size.height));
+                    static std::unordered_set<u64> logged;
+                    const u64 key = (u64(image.info.guest_address) << 32) |
+                                    (u64(window_width) << 16) | u64(window_height);
+                    if (logged.insert(key).second) {
+                        LOG_INFO(Render_Vulkan,
+                                 "Upscaling VideoOut pass: surface {}x{}, window {}x{}, "
+                                 "ratio {}x{}, vte=({},{})",
+                                 image.info.size.width, image.info.size.height, u32(window_width),
+                                 u32(window_height), upscale_x, upscale_y,
+                                 regs.viewport_control.xscale_enable,
+                                 regs.viewport_control.yscale_enable);
+                    }
                 }
             }
         }
