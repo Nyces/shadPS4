@@ -141,35 +141,40 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // larger than the window the game renders with, the game was built for a
         // smaller output and only its buffer got enlarged (e.g. by a resolution
         // patch). Record the ratio to scale the whole pass up to the full surface
-        // instead of leaving it cropped in the top-left corner. The window is taken
-        // as the larger of the viewport and the screen scissor: RectList blits often
-        // submit screen-space vertices with the viewport transform disabled, where
-        // only the scissor reflects the window the game was built for.
-        if (image.usage.vo_surface) {
+        // instead of leaving it cropped in the top-left corner. The lookup goes
+        // through the registration table rather than the cached image because the
+        // texture cache may replace the image object while the registration stays
+        // valid. The window is taken as the larger of the viewport and the screen
+        // scissor: RectList blits often submit screen-space vertices with the
+        // viewport transform disabled, where only the scissor reflects the window
+        // the game was built for.
+        if (const auto* vo = liverpool->FindVideoOutSurface(col_buf.Address()); vo) {
             const auto& vp = regs.viewports[0];
             const auto scsr_w = float(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x));
             const auto scsr_h = float(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y));
             const auto window_width = std::max(std::abs(vp.xscale) * 2.0f, scsr_w);
             const auto window_height = std::max(std::abs(vp.yscale) * 2.0f, scsr_h);
+            // Align every pass that renders into this surface to its full extent so
+            // all of them share one depth attachment of a matching size, regardless
+            // of whether the pass itself needs scaling.
+            vo_extent.width = std::max(vo_extent.width, vo->width);
+            vo_extent.height = std::max(vo_extent.height, vo->height);
             if (window_width > 0.f && window_height > 0.f) {
-                const auto ratio_x = float(image.info.size.width) / window_width;
-                const auto ratio_y = float(image.info.size.height) / window_height;
+                const auto ratio_x = float(vo->width) / window_width;
+                const auto ratio_y = float(vo->height) / window_height;
                 if (ratio_x > 1.001f || ratio_y > 1.001f) {
                     upscale_x = std::max(upscale_x, std::max(ratio_x, 1.0f));
                     upscale_y = std::max(upscale_y, std::max(ratio_y, 1.0f));
                     output_upscaled = true;
-                    vo_extent.width = std::max(vo_extent.width, u16(image.info.size.width));
-                    vo_extent.height = std::max(vo_extent.height, u16(image.info.size.height));
                     static std::unordered_set<u64> logged;
-                    const u64 key = (u64(image.info.guest_address) << 32) |
-                                    (u64(window_width) << 16) | u64(window_height);
+                    const u64 key =
+                        (u64(vo->address) << 32) | (u64(window_width) << 16) | u64(window_height);
                     if (logged.insert(key).second) {
                         LOG_INFO(Render_Vulkan,
                                  "Upscaling VideoOut pass: surface {}x{}, window {}x{}, "
                                  "ratio {}x{}, vte=({},{})",
-                                 image.info.size.width, image.info.size.height, u32(window_width),
-                                 u32(window_height), upscale_x, upscale_y,
-                                 regs.viewport_control.xscale_enable,
+                                 vo->width, vo->height, u32(window_width), u32(window_height),
+                                 upscale_x, upscale_y, regs.viewport_control.xscale_enable,
                                  regs.viewport_control.yscale_enable);
                     }
                 }

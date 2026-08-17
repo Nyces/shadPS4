@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <coroutine>
 #include <exception>
@@ -30,6 +31,15 @@ struct VideoOutPort;
 
 namespace AmdGpu {
 
+// Address-to-extent record of the buffers registered with sceVideoOutRegisterBuffers.
+// Kept outside the texture cache because cached images can be replaced while the
+// registration stays valid for the whole session.
+struct VideoOutSurface {
+    VAddr address;
+    u16 width;
+    u16 height;
+};
+
 struct Liverpool {
     static constexpr u32 GfxQueueId = 0u;
     static constexpr u32 NumGfxRings = 1u;     // actually 2, but HP is reserved by system software
@@ -38,6 +48,8 @@ struct Liverpool {
     static constexpr u32 NumComputeRings = NumComputePipes * NumQueuesPerPipe;
     static constexpr u32 NumTotalQueues = NumGfxRings + NumComputeRings;
     static_assert(NumTotalQueues < 64u); // need to fit into u64 bitmap for ffs
+
+    static constexpr u32 MaxVideoOutSurfaces = 16u;
 
     enum ContextRegs : u32 {
         DbZInfo = 0xA010,
@@ -62,6 +74,35 @@ struct Liverpool {
     Regs regs{};
     std::array<CbDbExtent, NUM_COLOR_BUFFERS> last_cb_extent{};
     CbDbExtent last_db_extent{};
+
+    void RegisterVideoOutSurface(VAddr address, u16 width, u16 height) {
+        const u32 count = video_out_surface_count.load(std::memory_order_relaxed);
+        for (u32 i = 0; i < count; ++i) {
+            if (video_out_surfaces[i].address == address) {
+                video_out_surfaces[i] = {address, width, height};
+                return;
+            }
+        }
+        if (count >= MaxVideoOutSurfaces) {
+            return;
+        }
+        video_out_surfaces[count] = {address, width, height};
+        video_out_surface_count.store(count + 1, std::memory_order_release);
+    }
+
+    const VideoOutSurface* FindVideoOutSurface(VAddr address) const {
+        const u32 count = video_out_surface_count.load(std::memory_order_acquire);
+        for (u32 i = 0; i < count; ++i) {
+            if (video_out_surfaces[i].address == address) {
+                return &video_out_surfaces[i];
+            }
+        }
+        return nullptr;
+    }
+
+private:
+    std::array<VideoOutSurface, MaxVideoOutSurfaces> video_out_surfaces{};
+    std::atomic<u32> video_out_surface_count{0};
 
 public:
     explicit Liverpool();
