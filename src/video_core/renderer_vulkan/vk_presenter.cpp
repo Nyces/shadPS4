@@ -696,10 +696,6 @@ static vk::Format GetFrameViewFormat(const Libraries::VideoOut::PixelFormat form
 
 Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& attribute,
                                VAddr cpu_address) {
-    LOG_INFO(Render_Vulkan,
-             "[RES] prepare frame: address={:#x}, attribute={}x{}, pitch={}, format={:#x}",
-             cpu_address, attribute.attrib.width, attribute.attrib.height,
-             attribute.attrib.pitch_in_pixel, static_cast<u32>(attribute.attrib.pixel_format));
     auto desc = VideoCore::TextureCache::ImageDesc{attribute, cpu_address};
     const auto image_id = texture_cache.FindImage(desc);
     texture_cache.UpdateImage(image_id);
@@ -740,10 +736,6 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     auto& image = texture_cache.GetImage(image_id);
     auto image_view = *image.FindView(view_info).image_view;
     const vk::Extent2D image_size = {image.info.size.width, image.info.size.height};
-    LOG_INFO(Render_Vulkan,
-             "[RES] presenter image: source={}x{}, output={}x{}, attribute={}x{}, pitch={}",
-             image_size.width, image_size.height, frame->width, frame->height,
-             attribute.attrib.width, attribute.attrib.height, attribute.attrib.pitch_in_pixel);
     expected_ratio = static_cast<float>(image_size.width) / static_cast<float>(image_size.height);
 
     const u32 capture_game_only_count = VideoCore::ConsumeGameOnlyScreenshotRequests();

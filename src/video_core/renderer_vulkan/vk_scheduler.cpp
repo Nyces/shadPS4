@@ -9,8 +9,6 @@
 #include "video_core/renderer_vulkan/vk_instance.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 
-#include <string>
-
 namespace Vulkan {
 
 std::recursive_mutex Scheduler::submit_mutex;
@@ -34,27 +32,6 @@ Scheduler::~Scheduler() {
 void Scheduler::BeginRendering(const RenderState& new_state) {
     if (is_rendering && render_state == new_state) {
         return;
-    }
-    const auto& logged_depth = logged_render_state.depth_stencil_attachment;
-    const auto& new_depth = new_state.depth_stencil_attachment;
-    if (!has_logged_render_state || logged_render_state.width != new_state.width ||
-        logged_render_state.height != new_state.height ||
-        logged_render_state.num_layers != new_state.num_layers ||
-        logged_render_state.num_color_attachments != new_state.num_color_attachments ||
-        logged_depth.has_depth != new_depth.has_depth ||
-        logged_depth.has_stencil != new_depth.has_stencil) {
-        std::string clear_flags;
-        for (u32 i = 0; i < new_state.num_color_attachments; ++i) {
-            clear_flags += new_state.color_attachments[i].is_clear ? "C" : "L";
-        }
-        LOG_INFO(Render_Vulkan,
-                 "[RES] render target: {}x{}, layers={}, colors={}, depth={}, stencil={}, "
-                 "load={}",
-                 new_state.width, new_state.height, new_state.num_layers,
-                 new_state.num_color_attachments, new_state.depth_stencil_attachment.has_depth,
-                 new_state.depth_stencil_attachment.has_stencil, clear_flags);
-        logged_render_state = new_state;
-        has_logged_render_state = true;
     }
     EndRendering();
     is_rendering = true;
@@ -257,31 +234,10 @@ void Scheduler::PriorityPendingOpsThread(std::stop_token stoken) {
 void DynamicState::Commit(const Instance& instance, const vk::CommandBuffer& cmdbuf) {
     if (dirty_state.viewports) {
         dirty_state.viewports = false;
-        if (!has_logged_viewports || !std::ranges::equal(logged_viewports, viewports)) {
-            for (u32 i = 0; i < viewports.size(); ++i) {
-                const auto& viewport = viewports[i];
-                LOG_INFO(Render_Vulkan,
-                         "[RES] viewport[{}]: x={}, y={}, width={}, height={}, depth={}..{}", i,
-                         viewport.x, viewport.y, viewport.width, viewport.height, viewport.minDepth,
-                         viewport.maxDepth);
-            }
-            logged_viewports = viewports;
-            has_logged_viewports = true;
-        }
         cmdbuf.setViewportWithCount(viewports);
     }
     if (dirty_state.scissors) {
         dirty_state.scissors = false;
-        if (!has_logged_scissors || !std::ranges::equal(logged_scissors, scissors)) {
-            for (u32 i = 0; i < scissors.size(); ++i) {
-                const auto& scissor = scissors[i];
-                LOG_INFO(Render_Vulkan, "[RES] scissor[{}]: x={}, y={}, width={}, height={}", i,
-                         scissor.offset.x, scissor.offset.y, scissor.extent.width,
-                         scissor.extent.height);
-            }
-            logged_scissors = scissors;
-            has_logged_scissors = true;
-        }
         cmdbuf.setScissorWithCount(scissors);
     }
     if (dirty_state.depth_test_enabled) {

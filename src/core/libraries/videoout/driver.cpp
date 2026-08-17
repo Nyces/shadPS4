@@ -318,18 +318,11 @@ bool VideoOutDriver::SubmitFlip(VideoOutPort* port, s32 index, s64 flip_arg,
 void VideoOutDriver::SubmitFlipInternal(VideoOutPort* port, s32 index, s64 flip_arg, bool is_eop) {
     Vulkan::Frame* frame;
     if (index == -1) {
-        LOG_INFO(Lib_VideoOut, "[RES] submit flip: blank frame, flipArg={}, eop={}", flip_arg,
-                 is_eop);
         frame = presenter->PrepareBlankFrame(false);
     } else {
         const auto& buffer = port->buffer_slots[index];
         ASSERT_MSG(buffer.group_index >= 0, "Trying to flip an unregistered buffer!");
         const auto& group = port->groups[buffer.group_index];
-        LOG_INFO(Lib_VideoOut,
-                 "[RES] submit flip: index={}, group={}, address={:#x}, attribute={}x{}, pitch={}, "
-                 "flipArg={}, eop={}",
-                 index, buffer.group_index, buffer.address_left, group.attrib.width,
-                 group.attrib.height, group.attrib.pitch_in_pixel, flip_arg, is_eop);
         frame = presenter->PrepareFrame(group, buffer.address_left);
     }
 

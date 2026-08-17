@@ -14,9 +14,6 @@
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
-#include <cmath>
-#include <unordered_set>
-
 #ifdef MemoryBarrier
 #undef MemoryBarrier
 #endif
@@ -113,31 +110,9 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = liverpool->regs;
-    resolution_upscaled = false;
-    push_data_upscaled = false;
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
     }
-
-    // If the viewport is larger than the bound render target (e.g. 4K viewport on a
-    // 1080p target), enlarge the target so the scene renders natively at the viewport
-    // resolution instead of being cropped to the top-left corner.
-    const auto get_scaled_hint = [&](const AmdGpu::CbDbExtent& hint) {
-        auto extent = hint;
-        if (!regs.IsClipDisabled() && hint.Valid()) {
-            const auto& vp = regs.viewports[0];
-            const u32 vp_width = static_cast<u32>(std::abs(vp.xscale) * 2.0f);
-            const u32 vp_height = static_cast<u32>(std::abs(vp.yscale) * 2.0f);
-            if (vp_width > extent.width && vp_height > extent.height) {
-                LOG_INFO(Render_Vulkan, "[RES] upscale target: hint={}x{}, viewport={}x{} -> {}x{}",
-                         extent.width, extent.height, vp_width, vp_height, vp_width, vp_height);
-                extent.width = static_cast<u16>(vp_width);
-                extent.height = static_cast<u16>(vp_height);
-                resolution_upscaled = true;
-            }
-        }
-        return extent;
-    };
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
@@ -149,23 +124,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             image_id = {};
             continue;
         }
-        const auto hint = get_scaled_hint(liverpool->last_cb_extent[cb]);
-        // When the game submits a 4K render target (via patch) but the composite
-        // blit still uses a 1080p viewport with clipping disabled, the upscaling
-        // shader reads push_data.xscale/yscale (still 1080p values) to convert
-        // window coords to NDC. Mark this so we can scale scissor and push data.
-        if (hint.width == 3840 && hint.height == 2160 && regs.IsClipDisabled()) {
-            const auto& vp = regs.viewports[0];
-            const u32 vp_width = static_cast<u32>(std::abs(vp.xscale) * 2.0f);
-            const u32 vp_height = static_cast<u32>(std::abs(vp.yscale) * 2.0f);
-            if (vp_width <= 1920 && vp_height <= 1080) {
-                LOG_INFO(Render_Vulkan,
-                         "[RES] 4K target with 1080p clip-disabled viewport: "
-                         "hint={}x{}, vp={}x{}",
-                         hint.width, hint.height, vp_width, vp_height);
-                push_data_upscaled = true;
-            }
-        }
+        const auto& hint = liverpool->last_cb_extent[cb];
         std::construct_at(&desc, col_buf, hint);
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
@@ -175,16 +134,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
         (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid())) {
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
-        const auto hint = get_scaled_hint(liverpool->last_db_extent);
-        if (hint.width == 1920 && hint.height == 1080) {
-            LOG_INFO(Render_Vulkan,
-                     "[RES] DB bind: address={:#x}, hint={}x{}, pitch={}, regHeight={}, "
-                     "screenScissor={}x{}, cb0={:#x}",
-                     regs.depth_buffer.DepthAddress(), hint.width, hint.height,
-                     regs.depth_buffer.Pitch(), regs.depth_buffer.Height(),
-                     regs.screen_scissor.bottom_right_x, regs.screen_scissor.bottom_right_y,
-                     regs.color_buffers[0].Address());
-        }
+        const auto& hint = liverpool->last_db_extent;
         auto& [image_id, desc] = db_desc;
         std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
                           htile_address, hint);
@@ -250,21 +200,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    {
-        const auto& key = pipeline->GetGraphicsKey();
-        const auto& vp = regs.viewports[0];
-        LOG_INFO(Render_Vulkan,
-                 "[RES] draw: prim={} idx={} inst={} cb0={:#x} db={:#x} vp=({},{},{},{}) "
-                 "scsr={}x{} clip={} vs={:#x} ps={:#x}",
-                 static_cast<u32>(regs.primitive_type), regs.num_indices,
-                 regs.num_instances.NumInstances(), regs.color_buffers[0].Address(),
-                 regs.depth_buffer.DepthAddress(), vp.xoffset, vp.yoffset, vp.xscale, vp.yscale,
-                 regs.screen_scissor.bottom_right_x, regs.screen_scissor.bottom_right_y,
-                 regs.IsClipDisabled(),
-                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)],
-                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)]);
-    }
-
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
@@ -311,22 +246,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     const GraphicsPipeline* pipeline = pipeline_cache.GetGraphicsPipeline();
     if (!pipeline) {
         return;
-    }
-
-    {
-        const auto& regs = liverpool->regs;
-        const auto& key = pipeline->GetGraphicsKey();
-        const auto& vp = regs.viewports[0];
-        LOG_INFO(Render_Vulkan,
-                 "[RES] drawIndirect: prim={} idx={} inst={} cb0={:#x} db={:#x} vp=({},{},{},{}) "
-                 "scsr={}x{} clip={} vs={:#x} ps={:#x}",
-                 static_cast<u32>(regs.primitive_type), regs.num_indices,
-                 regs.num_instances.NumInstances(), regs.color_buffers[0].Address(),
-                 regs.depth_buffer.DepthAddress(), vp.xoffset, vp.yoffset, vp.xscale, vp.yscale,
-                 regs.screen_scissor.bottom_right_x, regs.screen_scissor.bottom_right_y,
-                 regs.IsClipDisabled(),
-                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)],
-                 key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)]);
     }
 
     PrepareRenderState(pipeline);
@@ -493,15 +412,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    // When the game submits a 4K render target but the composite blit still uses a
-    // 1080p viewport with clipping disabled, the upscaling shader converts window
-    // coords to NDC via push_data.xscale/yscale (see ConvertPositionToClipSpace).
-    // Scale them by 2x so the blit quad covers the whole 4K target instead of the
-    // top-left 1080p corner.
-    if (push_data_upscaled) {
-        push_data.xscale *= 2.0f;
-        push_data.yscale *= 2.0f;
-    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -841,18 +751,6 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
-            // res diagnostic: report the sampled texture sizes to see whether the final
-            // composite reads the (enlarged) 4K scene buffer or a 1080p view of it.
-            static std::unordered_set<u64> logged_sampled_textures;
-            const u64 tex_key = (static_cast<u64>(image.info.guest_address) << 32) |
-                                (static_cast<u64>(image.info.size.width) << 16) |
-                                image.info.size.height;
-            if (logged_sampled_textures.insert(tex_key).second) {
-                LOG_INFO(Render_Vulkan, "[RES] sampled texture: addr={:#x} size={}x{} fmt={}",
-                         image.info.guest_address, image.info.size.width, image.info.size.height,
-                         vk::to_string(image.info.pixel_format));
-            }
-
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
             // storage and feedback loop doesn't make sense for them
@@ -956,17 +854,6 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         const auto mip = image_view.info.range.base.level;
 
         const auto& col_buf = regs.color_buffers[cb];
-        const auto& extent_hint = liverpool->last_cb_extent[cb];
-        if ((image->info.size.width == 1920 && image->info.size.height == 1080) ||
-            (image->info.size.width == 3840 && image->info.size.height == 2160)) {
-            LOG_INFO(
-                Render_Vulkan,
-                "[RES] CB{} image: address={:#x}, hint={}x{} valid={}, pitch={}, regHeight={}, "
-                "image={}x{}, mip={}",
-                cb, col_buf.Address(), extent_hint.width, extent_hint.height, extent_hint.Valid(),
-                col_buf.Pitch(), col_buf.Height(), image->info.size.width, image->info.size.height,
-                mip);
-        }
         const bool is_clear = texture_cache.IsMetaCleared(col_buf.CmaskAddress(), slice);
         texture_cache.TouchMeta(col_buf.CmaskAddress(), slice, false);
 
@@ -1002,38 +889,12 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
     for (u32 cb = state.num_color_attachments; cb < state.color_attachments.size(); ++cb) {
         state.color_attachments[cb] = {};
     }
-    render_target_width = state.width;
-    render_target_height = state.height;
-
-    const bool color_is_4k =
-        state.num_color_attachments > 0 && state.width == 3840 && state.height == 2160;
 
     if (auto image_id = db_desc.first; image_id) {
         auto& desc = db_desc.second;
         const auto htile_address = regs.depth_htile_data_base.GetAddress();
         const auto& image_view = texture_cache.FindDepthTarget(image_id, desc);
         auto& image = texture_cache.GetImage(image_id);
-        if (color_is_4k && image.info.size.width == 1920 && image.info.size.height == 1080) {
-            LOG_INFO(Render_Vulkan,
-                     "[RES] DB skip: dropping 1080p depth {:#x} from 4K color pass to keep "
-                     "render area {}x{}",
-                     regs.depth_buffer.DepthAddress(), state.width, state.height);
-            state.depth_stencil_attachment = {};
-            if (state.num_layers == std::numeric_limits<u16>::max()) {
-                state.num_layers = 1;
-            }
-            return state;
-        }
-        if ((image.info.size.width == 1920 && image.info.size.height == 1080) ||
-            (image.info.size.width == 3840 && image.info.size.height == 2160)) {
-            LOG_INFO(Render_Vulkan,
-                     "[RES] DB image: address={:#x}, hint={}x{} valid={}, pitch={}, regHeight={}, "
-                     "image={}x{}",
-                     regs.depth_buffer.DepthAddress(), liverpool->last_db_extent.width,
-                     liverpool->last_db_extent.height, liverpool->last_db_extent.Valid(),
-                     regs.depth_buffer.Pitch(), regs.depth_buffer.Height(), image.info.size.width,
-                     image.info.size.height);
-        }
 
         const auto slice = image_view.info.range.base.layer;
         const bool is_depth_clear = regs.depth_render_control.depth_clear_enable ||
@@ -1337,23 +1198,6 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.height = yscale * 2.0f;
         }
 
-        // When the game submits a 1080p fullscreen viewport while the bound render
-        // target was enlarged to 4K (e.g. the composite blit that upscales the scene
-        // to the 4K output), scale the viewport up to cover the whole 4K target.
-        // Otherwise the scene is drawn only in the top-left 1080p corner of the
-        // enlarged target, leaving the rest of the 4K framebuffer empty.
-        const bool vp_is_1080p_fullscreen =
-            render_target_width == 3840 && render_target_height == 2160 &&
-            std::abs(viewport.width) <= 1920.f && std::abs(viewport.height) <= 1080.f;
-        if (vp_is_1080p_fullscreen) {
-            const bool flip_y = viewport.height < 0.f;
-            viewport.x = 0.f;
-            viewport.y = flip_y ? static_cast<float>(render_target_height) : 0.f;
-            viewport.width = static_cast<float>(render_target_width);
-            viewport.height = flip_y ? -static_cast<float>(render_target_height)
-                                     : static_cast<float>(render_target_height);
-        }
-
         viewports.push_back(viewport);
 
         auto vp_scsr = scsr;
@@ -1366,16 +1210,6 @@ void Rasterizer::UpdateViewportScissorState() const {
                                               regs.viewport_scissors[i].bottom_right_x);
             vp_scsr.bottom_right_y = std::min(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_y),
                                               regs.viewport_scissors[i].bottom_right_y);
-        }
-        // When the render target was enlarged to the viewport size, expand the scissor
-        // to cover the full target; otherwise the game's 1080p scissor would clip the
-        // 4K scene back down to the top-left corner. push_data_upscaled covers the
-        // clip-disabled composite blit where the viewport stays at the full window size.
-        if (resolution_upscaled || vp_is_1080p_fullscreen || push_data_upscaled) {
-            vp_scsr.top_left_x = 0;
-            vp_scsr.top_left_y = 0;
-            vp_scsr.bottom_right_x = static_cast<s16>(render_target_width);
-            vp_scsr.bottom_right_y = static_cast<s16>(render_target_height);
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},

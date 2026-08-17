@@ -396,14 +396,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (nop_offset == 0x0e || nop_offset == 0x0d || nop_offset == 0x0b) {
                         ASSERT_MSG(payload[nop_offset] == 0xc0001000,
                                    "NOP hint is missing in CB setup sequence");
-                        const auto previous_extent = last_cb_extent[col_buf_id];
                         last_cb_extent[col_buf_id].raw = payload[nop_offset + 1];
-                        if (previous_extent.raw != last_cb_extent[col_buf_id].raw) {
-                            LOG_INFO(Render, "[RES] CB{} hint: {}x{}, raw={:#x}", col_buf_id,
-                                     last_cb_extent[col_buf_id].width,
-                                     last_cb_extent[col_buf_id].height,
-                                     last_cb_extent[col_buf_id].raw);
-                        }
                     } else {
                         last_cb_extent[col_buf_id].raw = 0;
                     }
@@ -434,13 +427,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     if (header->type3.count == 8) {
                         ASSERT_MSG(payload[20] == 0xc0001000,
                                    "NOP hint is missing in DB setup sequence");
-                        const auto previous_db_extent = last_db_extent;
                         last_db_extent.raw = payload[21];
-                        if (previous_db_extent.raw != last_db_extent.raw) {
-                            LOG_INFO(Render, "[RES] DB hint: {}x{}, raw={:#x}",
-                                     last_db_extent.width, last_db_extent.height,
-                                     last_db_extent.raw);
-                        }
                     } else {
                         last_db_extent.raw = 0;
                     }
