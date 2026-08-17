@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <cmath>
 #include <unordered_set>
 
 #include "common/debug.h"
@@ -114,8 +113,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = liverpool->regs;
     output_upscaled = false;
-    upscale_x = 1.0f;
-    upscale_y = 1.0f;
+    vo_scissor_width = 0;
+    vo_scissor_height = 0;
     vo_pass = false;
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
@@ -138,55 +137,44 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
 
-        // A registered VideoOut surface defines the presentation window. When it is
-        // larger than the window the game renders with, the game was built for a
-        // smaller output and only its buffer got enlarged (e.g. by a resolution
-        // patch). Record the ratio to scale the whole pass up to the full surface
-        // instead of leaving it cropped in the top-left corner. The lookup goes
-        // through the registration table rather than the cached image because the
-        // texture cache may replace the image object while the registration stays
-        // valid. The window is taken as the larger of the viewport and the screen
-        // scissor: RectList blits often submit screen-space vertices with the
-        // viewport transform disabled, where only the scissor reflects the window
-        // the game was built for.
+        // A registered VideoOut surface defines the presentation window. When the game
+        // still clips to a smaller window than the surface it renders into (e.g. a
+        // resolution patch enlarged the output buffer and the vertex positions, but the
+        // scissor registers kept the original size), the frame gets cropped to the
+        // top-left corner. Record the surface extent so the scissor can be opened up.
+        // The lookup goes through the registration table rather than the cached image
+        // because the texture cache may replace the image object while the registration
+        // stays valid.
         if (const auto* vo = liverpool->FindVideoOutSurface(col_buf.Address()); vo) {
             const auto& vp = regs.viewports[0];
-            const auto scsr_w = float(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x));
-            const auto scsr_h = float(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y));
-            const auto window_width = std::max(std::abs(vp.xscale) * 2.0f, scsr_w);
-            const auto window_height = std::max(std::abs(vp.yscale) * 2.0f, scsr_h);
+            const u32 scsr_w = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x);
+            const u32 scsr_h = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y);
             vo_pass = true;
             // Align every pass that renders into this surface to its full extent so
             // all of them share one depth attachment of a matching size, regardless
-            // of whether the pass itself needs scaling.
+            // of whether the pass itself needs adjusting.
             vo_extent.width = std::max(vo_extent.width, vo->width);
             vo_extent.height = std::max(vo_extent.height, vo->height);
-            if (window_width > 0.f && window_height > 0.f) {
-                const auto ratio_x = float(vo->width) / window_width;
-                const auto ratio_y = float(vo->height) / window_height;
-                if (ratio_x > 1.001f || ratio_y > 1.001f) {
-                    upscale_x = std::max(upscale_x, std::max(ratio_x, 1.0f));
-                    upscale_y = std::max(upscale_y, std::max(ratio_y, 1.0f));
-                    output_upscaled = true;
-                }
+            if (scsr_w < vo->width || scsr_h < vo->height) {
+                output_upscaled = true;
+                vo_scissor_width = std::max<u32>(vo_scissor_width, vo->width);
+                vo_scissor_height = std::max<u32>(vo_scissor_height, vo->height);
             }
             // Report every pass targeting the output surface, including the ones that
-            // need no scaling, so the whole composition can be reconstructed.
+            // need no adjusting, so the whole composition can be reconstructed.
             static std::unordered_set<u64> logged;
-            const u64 log_key = (u64(u32(window_width)) << 32) | (u64(u32(window_height)) << 16) |
+            const u64 log_key = (u64(scsr_w) << 32) | (u64(scsr_h) << 16) |
                                 (u64(static_cast<u32>(regs.primitive_type)) << 4) |
                                 (regs.IsClipDisabled() ? 2u : 0u) |
                                 (regs.viewport_control.xscale_enable ? 1u : 0u);
             if (logged.insert(log_key).second) {
                 LOG_INFO(Render_Vulkan,
-                         "VideoOut pass: surface {}x{}, window {}x{}, ratio {}x{}, prim={}, "
-                         "clipDisabled={}, vte=({},{}), vp=({},{},{},{}), screenScissor={}x{}, "
-                         "mrt={:#x}",
-                         vo->width, vo->height, u32(window_width), u32(window_height), upscale_x,
-                         upscale_y, static_cast<u32>(regs.primitive_type), regs.IsClipDisabled(),
-                         regs.viewport_control.xscale_enable, regs.viewport_control.yscale_enable,
-                         vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, u32(scsr_w), u32(scsr_h),
-                         key.mrt_mask);
+                         "VideoOut pass: surface {}x{}, prim={}, clipDisabled={}, vte=({},{}), "
+                         "vp=({},{},{},{}), screenScissor={}x{}, mrt={:#x}, opened={}",
+                         vo->width, vo->height, static_cast<u32>(regs.primitive_type),
+                         regs.IsClipDisabled(), regs.viewport_control.xscale_enable,
+                         regs.viewport_control.yscale_enable, vp.xoffset, vp.yoffset, vp.xscale,
+                         vp.yscale, scsr_w, scsr_h, key.mrt_mask, output_upscaled);
             }
         }
     }
@@ -479,17 +467,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
-        // With clipping disabled the viewport covers the whole hardware window and the
-        // shader turns vertex positions into window coordinates through push data (see
-        // ConvertPositionToClipSpace), so the viewport scaling below cannot reach this
-        // path. Scale the conversion itself instead. Passes that do use the viewport
-        // transform must not be touched here: their positions are already in NDC.
-        push_data.xoffset *= upscale_x;
-        push_data.xscale *= upscale_x;
-        push_data.yoffset *= upscale_y;
-        push_data.yscale *= upscale_y;
-    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -1291,13 +1268,6 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
-            if (output_upscaled) {
-                // Scale the viewport together with the enlarged VideoOut target.
-                viewport.x *= upscale_x;
-                viewport.y *= upscale_y;
-                viewport.width *= upscale_x;
-                viewport.height *= upscale_y;
-            }
         }
 
         viewports.push_back(viewport);
@@ -1314,12 +1284,14 @@ void Rasterizer::UpdateViewportScissorState() const {
                                               regs.viewport_scissors[i].bottom_right_y);
         }
         if (output_upscaled) {
-            // Scale the scissor with the pass; otherwise the game's old window
-            // rectangle would clip the upscaled render to the top-left corner.
-            vp_scsr.top_left_x = s16(std::lround(vp_scsr.top_left_x * upscale_x));
-            vp_scsr.top_left_y = s16(std::lround(vp_scsr.top_left_y * upscale_y));
-            vp_scsr.bottom_right_x = s16(std::lround(vp_scsr.bottom_right_x * upscale_x));
-            vp_scsr.bottom_right_y = s16(std::lround(vp_scsr.bottom_right_y * upscale_y));
+            // The game clips to the window it was built for while the vertices already
+            // cover the enlarged output surface, which would crop the frame to the
+            // top-left corner. Open the scissor up to the whole surface; the vertices
+            // and the viewport already define the actual bounds.
+            vp_scsr.top_left_x = 0;
+            vp_scsr.top_left_y = 0;
+            vp_scsr.bottom_right_x = s16(vo_scissor_width);
+            vp_scsr.bottom_right_y = s16(vo_scissor_height);
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},

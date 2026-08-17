@@ -149,13 +149,13 @@ private:
     bool attachment_feedback_loop{};
 
     // VideoOut output auto-fit: set when a draw targets a registered VideoOut surface
-    // larger than the window the game renders with (e.g. a resolution patch enlarged
-    // the output buffer while the game still submits its original viewport). The pass
-    // is scaled by the recorded ratio so the frame fills the whole surface. Without
-    // such a patch the ratio stays 1.0 and the behavior is unchanged.
+    // whose extent exceeds the window the game clips to (e.g. a resolution patch
+    // enlarged the output buffer). The scissor is then opened to the surface extent so
+    // the frame is not cropped to the top-left corner. Without such a patch the surface
+    // matches the window, this stays disabled and the behavior is unchanged.
     mutable bool output_upscaled{};
-    mutable float upscale_x{1.0f};
-    mutable float upscale_y{1.0f};
+    mutable u32 vo_scissor_width{};
+    mutable u32 vo_scissor_height{};
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
