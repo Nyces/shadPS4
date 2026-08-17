@@ -116,6 +116,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     output_upscaled = false;
     upscale_x = 1.0f;
     upscale_y = 1.0f;
+    vo_pass = false;
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
@@ -154,6 +155,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             const auto scsr_h = float(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y));
             const auto window_width = std::max(std::abs(vp.xscale) * 2.0f, scsr_w);
             const auto window_height = std::max(std::abs(vp.yscale) * 2.0f, scsr_h);
+            vo_pass = true;
             // Align every pass that renders into this surface to its full extent so
             // all of them share one depth attachment of a matching size, regardless
             // of whether the pass itself needs scaling.
@@ -166,22 +168,25 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                     upscale_x = std::max(upscale_x, std::max(ratio_x, 1.0f));
                     upscale_y = std::max(upscale_y, std::max(ratio_y, 1.0f));
                     output_upscaled = true;
-                    static std::unordered_set<u64> logged;
-                    const u64 key = (u64(window_width) << 32) | (u64(window_height) << 16) |
-                                    (u64(static_cast<u32>(regs.primitive_type)) << 4) |
-                                    (regs.IsClipDisabled() ? 2u : 0u) |
-                                    (regs.viewport_control.xscale_enable ? 1u : 0u);
-                    if (logged.insert(key).second) {
-                        LOG_INFO(Render_Vulkan,
-                                 "Upscaling VideoOut pass: surface {}x{}, window {}x{}, "
-                                 "ratio {}x{}, prim={}, clipDisabled={}, vte=({},{}), "
-                                 "screenScissor={}x{}",
-                                 vo->width, vo->height, u32(window_width), u32(window_height),
-                                 upscale_x, upscale_y, static_cast<u32>(regs.primitive_type),
-                                 regs.IsClipDisabled(), regs.viewport_control.xscale_enable,
-                                 regs.viewport_control.yscale_enable, u32(scsr_w), u32(scsr_h));
-                    }
                 }
+            }
+            // Report every pass targeting the output surface, including the ones that
+            // need no scaling, so the whole composition can be reconstructed.
+            static std::unordered_set<u64> logged;
+            const u64 log_key = (u64(u32(window_width)) << 32) | (u64(u32(window_height)) << 16) |
+                                (u64(static_cast<u32>(regs.primitive_type)) << 4) |
+                                (regs.IsClipDisabled() ? 2u : 0u) |
+                                (regs.viewport_control.xscale_enable ? 1u : 0u);
+            if (logged.insert(log_key).second) {
+                LOG_INFO(Render_Vulkan,
+                         "VideoOut pass: surface {}x{}, window {}x{}, ratio {}x{}, prim={}, "
+                         "clipDisabled={}, vte=({},{}), vp=({},{},{},{}), screenScissor={}x{}, "
+                         "mrt={:#x}",
+                         vo->width, vo->height, u32(window_width), u32(window_height), upscale_x,
+                         upscale_y, static_cast<u32>(regs.primitive_type), regs.IsClipDisabled(),
+                         regs.viewport_control.xscale_enable, regs.viewport_control.yscale_enable,
+                         vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, u32(scsr_w), u32(scsr_h),
+                         key.mrt_mask);
             }
         }
     }
@@ -823,6 +828,23 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
+
+            if (vo_pass) {
+                // Report what the output composition samples, to tell a genuinely
+                // low-resolution source apart from a full-size one that is only
+                // partially sampled.
+                static std::unordered_set<u64> logged_vo_src;
+                const u64 src_key = (u64(image.info.size.width) << 32) |
+                                    (u64(image.info.size.height) << 16) |
+                                    u64(static_cast<u32>(image.info.pixel_format));
+                if (logged_vo_src.insert(src_key).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "VideoOut pass samples: {}x{} fmt={} addr={:#x} pitch={}",
+                             image.info.size.width, image.info.size.height,
+                             vk::to_string(image.info.pixel_format), image.info.guest_address,
+                             image.info.pitch);
+                }
+            }
 
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as

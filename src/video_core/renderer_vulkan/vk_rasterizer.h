@@ -156,6 +156,9 @@ private:
     mutable bool output_upscaled{};
     mutable float upscale_x{1.0f};
     mutable float upscale_y{1.0f};
+    // Set while the current draw renders into a registered VideoOut surface, used to
+    // scope the output-composition diagnostics.
+    mutable bool vo_pass{};
 };
 
 } // namespace Vulkan
