@@ -167,15 +167,19 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                     upscale_y = std::max(upscale_y, std::max(ratio_y, 1.0f));
                     output_upscaled = true;
                     static std::unordered_set<u64> logged;
-                    const u64 key =
-                        (u64(vo->address) << 32) | (u64(window_width) << 16) | u64(window_height);
+                    const u64 key = (u64(window_width) << 32) | (u64(window_height) << 16) |
+                                    (u64(static_cast<u32>(regs.primitive_type)) << 4) |
+                                    (regs.IsClipDisabled() ? 2u : 0u) |
+                                    (regs.viewport_control.xscale_enable ? 1u : 0u);
                     if (logged.insert(key).second) {
                         LOG_INFO(Render_Vulkan,
                                  "Upscaling VideoOut pass: surface {}x{}, window {}x{}, "
-                                 "ratio {}x{}, vte=({},{})",
+                                 "ratio {}x{}, prim={}, clipDisabled={}, vte=({},{}), "
+                                 "screenScissor={}x{}",
                                  vo->width, vo->height, u32(window_width), u32(window_height),
-                                 upscale_x, upscale_y, regs.viewport_control.xscale_enable,
-                                 regs.viewport_control.yscale_enable);
+                                 upscale_x, upscale_y, static_cast<u32>(regs.primitive_type),
+                                 regs.IsClipDisabled(), regs.viewport_control.xscale_enable,
+                                 regs.viewport_control.yscale_enable, u32(scsr_w), u32(scsr_h));
                     }
                 }
             }
@@ -470,10 +474,12 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    if (output_upscaled) {
-        // With clipping disabled the shader converts window coordinates to NDC via
-        // push data (see ConvertPositionToClipSpace). Scale it along with the pass
-        // so such blits cover the enlarged VideoOut surface.
+    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
+        // With clipping disabled the viewport covers the whole hardware window and the
+        // shader turns vertex positions into window coordinates through push data (see
+        // ConvertPositionToClipSpace), so the viewport scaling below cannot reach this
+        // path. Scale the conversion itself instead. Passes that do use the viewport
+        // transform must not be touched here: their positions are already in NDC.
         push_data.xoffset *= upscale_x;
         push_data.xscale *= upscale_x;
         push_data.yoffset *= upscale_y;
