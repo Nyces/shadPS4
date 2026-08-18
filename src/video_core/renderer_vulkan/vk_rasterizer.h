@@ -165,6 +165,15 @@ private:
     // the passes whose own scissor registers were already updated to the full surface.
     float vo_known_fit_x{1.0f};
     float vo_known_fit_y{1.0f};
+    // Extent of the game's own window, taken from the pass that still clips to it. Used
+    // to recognise the offscreen targets the game allocates at that size so they can be
+    // scaled up together with the passes that render into them.
+    u32 vo_window_width{};
+    u32 vo_window_height{};
+    // Ratio applied to the current pass because it renders into an upscaled offscreen
+    // target rather than the output surface.
+    mutable float rt_fit_x{1.0f};
+    mutable float rt_fit_y{1.0f};
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
