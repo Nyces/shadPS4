@@ -139,6 +139,26 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
 
+        {
+            // Report every distinct render target with the register state it was derived
+            // from, to locate the ones the game still allocates at its original size.
+            static std::unordered_set<u64> logged_rt;
+            const u64 rt_key = (u64(image.info.size.width) << 40) |
+                               (u64(image.info.size.height) << 20) |
+                               u64(static_cast<u32>(image.info.pixel_format));
+            if (logged_rt.insert(rt_key).second) {
+                LOG_INFO(Render_Vulkan,
+                         "RT: {}x{} fmt={} addr={:#x} pitch={} regPitch={} regHeight={} "
+                         "hint={}x{} valid={} scsr={}x{}",
+                         image.info.size.width, image.info.size.height,
+                         vk::to_string(image.info.pixel_format), col_buf.Address(),
+                         image.info.pitch, col_buf.Pitch(), col_buf.Height(), hint.width,
+                         hint.height, hint.Valid(),
+                         AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x),
+                         AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y));
+            }
+        }
+
         // A registered VideoOut surface defines the presentation window. When the game
         // still clips to a smaller window than the surface it renders into (e.g. a
         // resolution patch enlarged the output buffer and the vertex positions, but the
