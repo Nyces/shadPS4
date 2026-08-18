@@ -118,8 +118,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     vo_fit_x = 1.0f;
     vo_fit_y = 1.0f;
     vo_pass = false;
-    rt_fit_x = 1.0f;
-    rt_fit_y = 1.0f;
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
@@ -135,19 +133,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             image_id = {};
             continue;
         }
-        auto hint = liverpool->last_cb_extent[cb];
-        const bool is_vo_target = liverpool->FindVideoOutSurface(col_buf.Address()) != nullptr;
-        if (!is_vo_target && vo_window_width > 0 && hint.Valid() && hint.width == vo_window_width &&
-            hint.height == vo_window_height) {
-            // An offscreen target the game still allocates at its original window size,
-            // even though the output surface was enlarged. Render it at the surface scale
-            // so the scene keeps the output resolution instead of being upscaled from the
-            // old one during composition.
-            hint.width = u16(vo_window_width * vo_known_fit_x);
-            hint.height = u16(vo_window_height * vo_known_fit_y);
-            rt_fit_x = vo_known_fit_x;
-            rt_fit_y = vo_known_fit_y;
-        }
+        const auto& hint = liverpool->last_cb_extent[cb];
         std::construct_at(&desc, col_buf, hint);
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
@@ -202,8 +188,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 if (scsr_w > 0 && scsr_h > 0) {
                     vo_known_fit_x = float(vo->width) / float(scsr_w);
                     vo_known_fit_y = float(vo->height) / float(scsr_h);
-                    vo_window_width = scsr_w;
-                    vo_window_height = scsr_h;
                 }
             }
             if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
@@ -241,11 +225,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             // attachment would shrink the framebuffer back to the old resolution and
             // clip the upscaled pass to its top-left corner.
             hint = vo_extent;
-        } else if (rt_fit_x > 1.001f && hint.Valid()) {
-            // Same for an offscreen pass that is being rendered at the surface scale: its
-            // depth attachment has to follow the enlarged color target.
-            hint.width = u16(hint.width * rt_fit_x);
-            hint.height = u16(hint.height * rt_fit_y);
         }
         auto& [image_id, desc] = db_desc;
         std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
@@ -1361,13 +1340,6 @@ void Rasterizer::UpdateViewportScissorState() const {
                 viewport.y *= vo_fit_y;
                 viewport.width *= vo_fit_x;
                 viewport.height *= vo_fit_y;
-            } else if (rt_fit_x > 1.001f) {
-                // Rendering into an offscreen target that was enlarged to the surface
-                // scale, so the viewport has to cover the enlarged target.
-                viewport.x *= rt_fit_x;
-                viewport.y *= rt_fit_y;
-                viewport.width *= rt_fit_x;
-                viewport.height *= rt_fit_y;
             }
         }
 
@@ -1392,15 +1364,6 @@ void Rasterizer::UpdateViewportScissorState() const {
             vp_scsr.top_left_y = 0;
             vp_scsr.bottom_right_x = s16(std::min<u32>(vo_surface_width, 16384u));
             vp_scsr.bottom_right_y = s16(std::min<u32>(vo_surface_height, 16384u));
-        } else if (rt_fit_x > 1.001f) {
-            // The offscreen target of this pass was enlarged, so its scissor has to grow
-            // with it or the render would stay confined to the original window.
-            vp_scsr.top_left_x = s16(vp_scsr.top_left_x * rt_fit_x);
-            vp_scsr.top_left_y = s16(vp_scsr.top_left_y * rt_fit_y);
-            vp_scsr.bottom_right_x =
-                s16(std::min<u32>(u32(vp_scsr.bottom_right_x * rt_fit_x), 16384u));
-            vp_scsr.bottom_right_y =
-                s16(std::min<u32>(u32(vp_scsr.bottom_right_y * rt_fit_y), 16384u));
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
