@@ -160,6 +160,11 @@ private:
     mutable bool output_upscaled{};
     mutable float vo_fit_x{1.0f};
     mutable float vo_fit_y{1.0f};
+    // Ratio last observed on a pass that still clips to the game's original window.
+    // It reveals the window the geometry of every output pass is built for, including
+    // the passes whose own scissor registers were already updated to the full surface.
+    float vo_known_fit_x{1.0f};
+    float vo_known_fit_y{1.0f};
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};

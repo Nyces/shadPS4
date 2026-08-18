@@ -161,11 +161,17 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             vo_surface_height = std::max(vo_surface_height, vo->height);
             if (scsr_w < vo->width || scsr_h < vo->height) {
                 // This pass still clips to the original window, so the ratio between the
-                // surface and that window is the scale its geometry is missing.
+                // surface and that window is the scale its geometry is missing. Remember
+                // it: the passes that already clip to the full surface cannot derive it
+                // themselves, yet their geometry is laid out for the same window.
                 if (scsr_w > 0 && scsr_h > 0) {
-                    vo_fit_x = float(vo->width) / float(scsr_w);
-                    vo_fit_y = float(vo->height) / float(scsr_h);
+                    vo_known_fit_x = float(vo->width) / float(scsr_w);
+                    vo_known_fit_y = float(vo->height) / float(scsr_h);
                 }
+            }
+            if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
+                vo_fit_x = vo_known_fit_x;
+                vo_fit_y = vo_known_fit_y;
                 output_upscaled = true;
             }
             // Report every pass targeting the output surface, including the ones that
@@ -476,6 +482,17 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
+        // Clip-disabled passes pin the viewport to the hardware window and convert
+        // positions to window coordinates in the shader through push data, which maps
+        // one window unit to one pixel (see ConvertPositionToClipSpace). Their vertices
+        // still span the game's original window, so scale the conversion to reach the
+        // whole surface. Viewport-transform passes are handled on the viewport instead.
+        push_data.xoffset *= vo_fit_x;
+        push_data.xscale *= vo_fit_x;
+        push_data.yoffset *= vo_fit_y;
+        push_data.yscale *= vo_fit_y;
+    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -1305,6 +1322,15 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
+            if (output_upscaled) {
+                // The geometry of this pass is still laid out for the game's original
+                // window, so it only reaches a fraction of the enlarged surface. Stretch
+                // the viewport by the same ratio to spread it over the whole surface.
+                viewport.x *= vo_fit_x;
+                viewport.y *= vo_fit_y;
+                viewport.width *= vo_fit_x;
+                viewport.height *= vo_fit_y;
+            }
         }
 
         viewports.push_back(viewport);
