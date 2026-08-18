@@ -148,19 +148,16 @@ private:
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
 
-    // VideoOut output auto-fit: set when a draw targets a registered VideoOut surface
-    // whose extent exceeds the window the game clips to (e.g. a resolution patch
-    // enlarged the output buffer). The scissor is then opened to the surface extent so
-    // the frame is not cropped to the top-left corner. Without such a patch the surface
-    // matches the window, this stays disabled and the behavior is unchanged.
-    mutable bool output_upscaled{};
-    // Extent of the VideoOut surface the current pass renders into, recorded for every
-    // such pass so the render area can be kept at the full surface size.
+    // VideoOut output auto-fit: the render area and the scissor of every pass drawing
+    // into a registered VideoOut surface are kept at the surface extent, so a stale
+    // attachment or scissor register cannot crop the frame to the top-left corner.
+    // Without a resolution patch the surface matches the game's window and this has no
+    // effect. The remaining fields are observations used by the diagnostics.
     mutable u16 vo_surface_width{};
     mutable u16 vo_surface_height{};
-    // Surface-to-window ratio of the current pass. Applied to the shader side clip
-    // space conversion of clip-disabled passes, whose screen-space vertices still
-    // describe the original window.
+    // True when the pass still clips to a window smaller than the surface, with the
+    // ratio between the two.
+    mutable bool output_upscaled{};
     mutable float vo_fit_x{1.0f};
     mutable float vo_fit_y{1.0f};
     // Set while the current draw renders into a registered VideoOut surface, used to
