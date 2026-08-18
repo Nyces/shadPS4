@@ -100,6 +100,19 @@ struct Liverpool {
         return nullptr;
     }
 
+    // Extent of the largest registered VideoOut surface, i.e. the resolution the frame is
+    // presented at. Offscreen targets smaller than this were sized for the game's own
+    // window and can be rendered at the presentation scale instead.
+    CbDbExtent GetVideoOutExtent() const {
+        CbDbExtent extent{};
+        const u32 count = video_out_surface_count.load(std::memory_order_acquire);
+        for (u32 i = 0; i < count; ++i) {
+            extent.width = std::max(extent.width, video_out_surfaces[i].width);
+            extent.height = std::max(extent.height, video_out_surfaces[i].height);
+        }
+        return extent;
+    }
+
 private:
     std::array<VideoOutSurface, MaxVideoOutSurfaces> video_out_surfaces{};
     std::atomic<u32> video_out_surface_count{0};

@@ -118,6 +118,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     vo_fit_x = 1.0f;
     vo_fit_y = 1.0f;
     vo_pass = false;
+    rt_fit_x = 1.0f;
+    rt_fit_y = 1.0f;
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
@@ -135,6 +137,24 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         }
         const auto& hint = liverpool->last_cb_extent[cb];
         std::construct_at(&desc, col_buf, hint);
+        // Offscreen targets the game sized for its own window keep the frame at that
+        // resolution even though the surface is larger, because the composition can only
+        // upscale what it is given. Render them at the presentation scale instead. The
+        // pitch has to grow along with the extent or the tiling math and the guest
+        // uploads would use a stride that no longer matches the image.
+        if (const auto vo_ext = liverpool->GetVideoOutExtent();
+            vo_ext.Valid() && !liverpool->FindVideoOutSurface(col_buf.Address()) &&
+            desc.info.size.width > 0 && desc.info.size.width < vo_ext.width &&
+            desc.info.size.height > 0 && desc.info.size.height < vo_ext.height &&
+            desc.info.size.width * 2 == vo_ext.width &&
+            desc.info.size.height * 2 == vo_ext.height) {
+            rt_fit_x = 2.0f;
+            rt_fit_y = 2.0f;
+            desc.info.size.width *= 2;
+            desc.info.size.height *= 2;
+            desc.info.pitch *= 2;
+            desc.info.UpdateSize();
+        }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
@@ -149,13 +169,16 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             if (logged_rt.insert(rt_key).second) {
                 LOG_INFO(Render_Vulkan,
                          "RT: {}x{} fmt={} addr={:#x} pitch={} regPitch={} regHeight={} "
-                         "hint={}x{} valid={} scsr={}x{}",
+                         "hint={}x{} valid={} scsr={}x{} tileMax={} sliceMax={} tileMode={} "
+                         "sliceSize={:#x}",
                          image.info.size.width, image.info.size.height,
                          vk::to_string(image.info.pixel_format), col_buf.Address(),
                          image.info.pitch, col_buf.Pitch(), col_buf.Height(), hint.width,
                          hint.height, hint.Valid(),
                          AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x),
-                         AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y));
+                         AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y),
+                         col_buf.pitch.tile_max, col_buf.slice.tile_max,
+                         static_cast<u32>(col_buf.GetTileMode()), col_buf.GetColorSliceSize());
             }
         }
 
@@ -229,6 +252,14 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         auto& [image_id, desc] = db_desc;
         std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
                           htile_address, hint);
+        if (rt_fit_x > 1.001f) {
+            // Follow the enlarged color target, otherwise the smaller depth attachment
+            // would shrink the framebuffer back and crop the pass.
+            desc.info.size.width = u32(desc.info.size.width * rt_fit_x);
+            desc.info.size.height = u32(desc.info.size.height * rt_fit_y);
+            desc.info.pitch = u32(desc.info.pitch * rt_fit_x);
+            desc.info.UpdateSize();
+        }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
@@ -1340,6 +1371,13 @@ void Rasterizer::UpdateViewportScissorState() const {
                 viewport.y *= vo_fit_y;
                 viewport.width *= vo_fit_x;
                 viewport.height *= vo_fit_y;
+            } else if (rt_fit_x > 1.001f) {
+                // The offscreen target of this pass is rendered at the presentation
+                // scale, so the viewport has to cover the enlarged target.
+                viewport.x *= rt_fit_x;
+                viewport.y *= rt_fit_y;
+                viewport.width *= rt_fit_x;
+                viewport.height *= rt_fit_y;
             }
         }
 
@@ -1364,6 +1402,15 @@ void Rasterizer::UpdateViewportScissorState() const {
             vp_scsr.top_left_y = 0;
             vp_scsr.bottom_right_x = s16(std::min<u32>(vo_surface_width, 16384u));
             vp_scsr.bottom_right_y = s16(std::min<u32>(vo_surface_height, 16384u));
+        } else if (rt_fit_x > 1.001f) {
+            // Grow the scissor with the enlarged offscreen target, otherwise the render
+            // would stay confined to the area of the original one.
+            vp_scsr.top_left_x = s16(vp_scsr.top_left_x * rt_fit_x);
+            vp_scsr.top_left_y = s16(vp_scsr.top_left_y * rt_fit_y);
+            vp_scsr.bottom_right_x = s16(std::min<u32>(
+                u32(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_x) * rt_fit_x), 16384u));
+            vp_scsr.bottom_right_y = s16(std::min<u32>(
+                u32(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_y) * rt_fit_y), 16384u));
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},

@@ -165,6 +165,10 @@ private:
     // the passes whose own scissor registers were already updated to the full surface.
     float vo_known_fit_x{1.0f};
     float vo_known_fit_y{1.0f};
+    // Ratio applied to the current pass because it renders into an offscreen target that
+    // was enlarged to the presentation scale.
+    mutable float rt_fit_x{1.0f};
+    mutable float rt_fit_y{1.0f};
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
