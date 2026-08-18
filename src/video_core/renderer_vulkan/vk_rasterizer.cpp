@@ -482,6 +482,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
+        // Clip-disabled passes convert positions to window coordinates in the shader,
+        // where one window unit maps to one pixel of a render space already pinned to
+        // the device limit. The render space cannot grow, so the conversion itself has
+        // to carry the stretch (see ConvertPositionToClipSpace).
+        push_data.xoffset *= vo_fit_x;
+        push_data.xscale *= vo_fit_x;
+        push_data.yoffset *= vo_fit_y;
+        push_data.yscale *= vo_fit_y;
+    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -821,20 +831,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
-            if (vo_pass) {
-                // Report what the output composition samples, to tell a genuinely
-                // low-resolution source apart from a full-size one that is only
-                // partially sampled.
-                static std::unordered_set<u64> logged_vo_src;
-                const u64 src_key = (u64(image.info.size.width) << 32) |
-                                    (u64(image.info.size.height) << 16) |
-                                    u64(static_cast<u32>(image.info.pixel_format));
-                if (logged_vo_src.insert(src_key).second) {
+            if (vo_pass && liverpool->regs.IsClipDisabled()) {
+                // Report what the scene composition reads and how its positions are
+                // converted, to tell apart a geometry problem from a sampling one.
+                static std::unordered_set<u64> logged_blit;
+                const u64 k = (u64(image.info.size.width) << 32) | image.info.size.height;
+                if (logged_blit.insert(k).second) {
+                    const auto& vp = liverpool->regs.viewports[0];
                     LOG_INFO(Render_Vulkan,
-                             "VideoOut pass samples: {}x{} fmt={} addr={:#x} pitch={}",
+                             "VideoOut composite: source {}x{} addr={:#x}, vp=({},{},{},{}), "
+                             "fit={}x{}, numIndices={}, prim={}",
                              image.info.size.width, image.info.size.height,
-                             vk::to_string(image.info.pixel_format), image.info.guest_address,
-                             image.info.pitch);
+                             image.info.guest_address, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale,
+                             vo_fit_x, vo_fit_y, liverpool->regs.num_indices,
+                             static_cast<u32>(liverpool->regs.primitive_type));
                 }
             }
 
@@ -1301,15 +1311,6 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = 0.f;
             viewport.width = float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB));
             viewport.height = float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB));
-            if (output_upscaled) {
-                // The shader maps one window unit of this render space to one pixel, so
-                // geometry laid out for the game's original window only reaches a
-                // fraction of the enlarged surface. Stretch the render space itself
-                // rather than the conversion constants: scaling those would also move
-                // the window origin and shift the image.
-                viewport.width *= vo_fit_x;
-                viewport.height *= vo_fit_y;
-            }
         } else {
             const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
             const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;
