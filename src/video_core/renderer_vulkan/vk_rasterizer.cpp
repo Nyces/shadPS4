@@ -144,8 +144,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // uploads would use a stride that no longer matches the image.
         if (const auto vo_ext = liverpool->GetVideoOutExtent();
             vo_ext.Valid() && !liverpool->FindVideoOutSurface(col_buf.Address()) &&
-            desc.info.size.width > 0 && desc.info.size.width < vo_ext.width &&
-            desc.info.size.height > 0 && desc.info.size.height < vo_ext.height &&
+            desc.info.size.width > 0 && desc.info.size.height > 0 &&
             desc.info.size.width * 2 == vo_ext.width &&
             desc.info.size.height * 2 == vo_ext.height) {
             rt_fit_x = 2.0f;
@@ -154,6 +153,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             desc.info.size.height *= 2;
             desc.info.pitch *= 2;
             desc.info.UpdateSize();
+            upscaled_targets.insert(desc.info.guest_address);
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
@@ -835,6 +835,18 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             } else if (mip_fallback_mode == Shader::MipStorageFallbackMode::DynamicIndex) {
                 desc.view_info.range.base.level += i;
                 desc.view_info.range.extent.levels = 1;
+            }
+
+            // A target that is rendered at the presentation scale is described by the
+            // shader at its original size, so the lookup has to be adjusted the same way
+            // or it would create a second image over the same memory and sample an empty
+            // one instead of the rendered contents.
+            if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address) &&
+                desc.info.size.width > 0 && desc.info.size.height > 0) {
+                desc.info.size.width *= 2;
+                desc.info.size.height *= 2;
+                desc.info.pitch *= 2;
+                desc.info.UpdateSize();
             }
 
             image_id = texture_cache.FindImage(desc);

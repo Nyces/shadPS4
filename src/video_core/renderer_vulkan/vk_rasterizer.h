@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <unordered_set>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -169,6 +171,10 @@ private:
     // was enlarged to the presentation scale.
     mutable float rt_fit_x{1.0f};
     mutable float rt_fit_y{1.0f};
+    // Addresses of the offscreen targets that are being rendered at the presentation
+    // scale. Shaders sampling them describe the original size, so the same adjustment has
+    // to be applied on the sampling path or the lookup would miss the enlarged image.
+    std::unordered_set<VAddr> upscaled_targets;
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
