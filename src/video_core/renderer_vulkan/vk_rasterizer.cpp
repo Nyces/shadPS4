@@ -113,8 +113,10 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     const auto& key = pipeline->GetGraphicsKey();
     const auto& regs = liverpool->regs;
     output_upscaled = false;
-    vo_scissor_width = 0;
-    vo_scissor_height = 0;
+    vo_surface_width = 0;
+    vo_surface_height = 0;
+    vo_fit_x = 1.0f;
+    vo_fit_y = 1.0f;
     vo_pass = false;
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
@@ -155,10 +157,14 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             // of whether the pass itself needs adjusting.
             vo_extent.width = std::max(vo_extent.width, vo->width);
             vo_extent.height = std::max(vo_extent.height, vo->height);
+            vo_surface_width = std::max(vo_surface_width, vo->width);
+            vo_surface_height = std::max(vo_surface_height, vo->height);
             if (scsr_w < vo->width || scsr_h < vo->height) {
                 output_upscaled = true;
-                vo_scissor_width = std::max<u32>(vo_scissor_width, vo->width);
-                vo_scissor_height = std::max<u32>(vo_scissor_height, vo->height);
+                if (scsr_w > 0 && scsr_h > 0) {
+                    vo_fit_x = float(vo->width) / float(scsr_w);
+                    vo_fit_y = float(vo->height) / float(scsr_h);
+                }
             }
             // Report every pass targeting the output surface, including the ones that
             // need no adjusting, so the whole composition can be reconstructed.
@@ -170,11 +176,12 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             if (logged.insert(log_key).second) {
                 LOG_INFO(Render_Vulkan,
                          "VideoOut pass: surface {}x{}, prim={}, clipDisabled={}, vte=({},{}), "
-                         "vp=({},{},{},{}), screenScissor={}x{}, mrt={:#x}, opened={}",
+                         "vp=({},{},{},{}), screenScissor={}x{}, mrt={:#x}, opened={}, fit={}x{}",
                          vo->width, vo->height, static_cast<u32>(regs.primitive_type),
                          regs.IsClipDisabled(), regs.viewport_control.xscale_enable,
                          regs.viewport_control.yscale_enable, vp.xoffset, vp.yoffset, vp.xscale,
-                         vp.yscale, scsr_w, scsr_h, key.mrt_mask, output_upscaled);
+                         vp.yscale, scsr_w, scsr_h, key.mrt_mask, output_upscaled, vo_fit_x,
+                         vo_fit_y);
             }
         }
     }
@@ -467,6 +474,18 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
+        // Clip-disabled passes keep the viewport pinned to the whole hardware window
+        // and convert vertex positions to window coordinates in the shader through
+        // push data (see ConvertPositionToClipSpace). Their vertices still describe the
+        // window the game was built for, so scale the conversion to reach the enlarged
+        // surface. Passes that use the viewport transform are left alone: they already
+        // submit positions for the full surface.
+        push_data.xoffset *= vo_fit_x;
+        push_data.xscale *= vo_fit_x;
+        push_data.yoffset *= vo_fit_y;
+        push_data.yscale *= vo_fit_y;
+    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -1020,6 +1039,34 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         state.num_layers = 1;
     }
 
+    if (vo_pass && vo_surface_width > 0 && vo_surface_height > 0) {
+        // The render area is the intersection of all attachments, so an attachment the
+        // game still sized for the original window shrinks it and crops the frame no
+        // matter how wide the scissor is. Keep the area at the output surface extent.
+        state.width = std::max<u16>(state.width, vo_surface_width);
+        state.height = std::max<u16>(state.height, vo_surface_height);
+    }
+
+    if (vo_pass) {
+        // The render area is the intersection of all attachments, so a stale
+        // attachment shrinks it and crops the frame regardless of the scissor.
+        static std::unordered_set<u64> logged_area;
+        const u64 area_key = (u64(state.width) << 32) | (u64(state.height) << 16) |
+                             (u64(state.num_color_attachments) << 2) |
+                             (state.depth_stencil_attachment.has_depth ? 1u : 0u);
+        if (logged_area.insert(area_key).second) {
+            LOG_INFO(
+                Render_Vulkan,
+                "VideoOut render area: {}x{}, colors={}, depth={}, cb0={}x{}, db={}x{}",
+                state.width, state.height, state.num_color_attachments,
+                state.depth_stencil_attachment.has_depth,
+                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.width : 0,
+                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.height : 0,
+                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.width : 0,
+                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.height : 0);
+        }
+    }
+
     return state;
 }
 
@@ -1283,15 +1330,14 @@ void Rasterizer::UpdateViewportScissorState() const {
             vp_scsr.bottom_right_y = std::min(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_y),
                                               regs.viewport_scissors[i].bottom_right_y);
         }
-        if (output_upscaled) {
-            // The game clips to the window it was built for while the vertices already
-            // cover the enlarged output surface, which would crop the frame to the
-            // top-left corner. Open the scissor up to the whole surface; the vertices
-            // and the viewport already define the actual bounds.
+        if (vo_pass && vo_surface_width > 0 && vo_surface_height > 0) {
+            // Passes drawing into the output surface must not be clipped by the window
+            // rectangle the game keeps in its scissor registers: the geometry and the
+            // render area already define the bounds.
             vp_scsr.top_left_x = 0;
             vp_scsr.top_left_y = 0;
-            vp_scsr.bottom_right_x = s16(vo_scissor_width);
-            vp_scsr.bottom_right_y = s16(vo_scissor_height);
+            vp_scsr.bottom_right_x = s16(std::min<u32>(vo_surface_width, 16384u));
+            vp_scsr.bottom_right_y = s16(std::min<u32>(vo_surface_height, 16384u));
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},

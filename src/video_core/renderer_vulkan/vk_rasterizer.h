@@ -154,8 +154,15 @@ private:
     // the frame is not cropped to the top-left corner. Without such a patch the surface
     // matches the window, this stays disabled and the behavior is unchanged.
     mutable bool output_upscaled{};
-    mutable u32 vo_scissor_width{};
-    mutable u32 vo_scissor_height{};
+    // Extent of the VideoOut surface the current pass renders into, recorded for every
+    // such pass so the render area can be kept at the full surface size.
+    mutable u16 vo_surface_width{};
+    mutable u16 vo_surface_height{};
+    // Surface-to-window ratio of the current pass. Applied to the shader side clip
+    // space conversion of clip-disabled passes, whose screen-space vertices still
+    // describe the original window.
+    mutable float vo_fit_x{1.0f};
+    mutable float vo_fit_y{1.0f};
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
