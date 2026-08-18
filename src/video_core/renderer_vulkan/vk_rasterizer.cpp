@@ -482,16 +482,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
-        // Clip-disabled passes convert positions to window coordinates in the shader,
-        // where one window unit maps to one pixel of a render space already pinned to
-        // the device limit. The render space cannot grow, so the conversion itself has
-        // to carry the stretch (see ConvertPositionToClipSpace).
-        push_data.xoffset *= vo_fit_x;
-        push_data.xscale *= vo_fit_x;
-        push_data.yoffset *= vo_fit_y;
-        push_data.yscale *= vo_fit_y;
-    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
