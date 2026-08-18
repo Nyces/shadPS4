@@ -482,17 +482,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
-        // Clip-disabled passes pin the viewport to the hardware window and convert
-        // positions to window coordinates in the shader through push data, which maps
-        // one window unit to one pixel (see ConvertPositionToClipSpace). Their vertices
-        // still span the game's original window, so scale the conversion to reach the
-        // whole surface. Viewport-transform passes are handled on the viewport instead.
-        push_data.xoffset *= vo_fit_x;
-        push_data.xscale *= vo_fit_x;
-        push_data.yoffset *= vo_fit_y;
-        push_data.yscale *= vo_fit_y;
-    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
@@ -1312,6 +1301,15 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = 0.f;
             viewport.width = float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB));
             viewport.height = float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB));
+            if (output_upscaled) {
+                // The shader maps one window unit of this render space to one pixel, so
+                // geometry laid out for the game's original window only reaches a
+                // fraction of the enlarged surface. Stretch the render space itself
+                // rather than the conversion constants: scaling those would also move
+                // the window origin and shift the image.
+                viewport.width *= vo_fit_x;
+                viewport.height *= vo_fit_y;
+            }
         } else {
             const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
             const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;
