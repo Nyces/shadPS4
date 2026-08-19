@@ -534,6 +534,23 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
+        // Clip-disabled passes pin the Vulkan viewport to the hardware window and turn
+        // vertex positions into window coordinates inside the shader through push data
+        // (see ConvertPositionToClipSpace), so the viewport stretch applied below can
+        // never reach them and the conversion itself has to carry the scale.
+        //
+        // The scene composition emits its quad as x in [-1, 0] and y in [-1, 1], so the
+        // conversion spans only xscale horizontally against 2*yscale vertically and the
+        // blit covers half the width of the target it draws into. Give the horizontal
+        // terms the extra factor of two on top of the surface ratio so the quad reaches
+        // the full extent on both axes.
+        const float fit_x = vo_fit_x * 2.0f;
+        push_data.xoffset *= fit_x;
+        push_data.xscale *= fit_x;
+        push_data.yoffset *= vo_fit_y;
+        push_data.yscale *= vo_fit_y;
+    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
