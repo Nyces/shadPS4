@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cmath>
 #include <unordered_set>
 
 #include "common/debug.h"
@@ -1441,7 +1442,16 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
-            if (output_upscaled) {
+            // A pass whose viewport already spans the output surface needs no stretch:
+            // the resolution patch made the game lay this geometry out at the full size
+            // and scaling it again would magnify it past the surface, which is what left
+            // the scene as a black block. Only the passes still using the original window
+            // are missing the ratio.
+            const bool viewport_covers_output =
+                vo_surface_width > 0 && vo_surface_height > 0 &&
+                viewport.width >= float(vo_surface_width) * 0.999f &&
+                std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
+            if (output_upscaled && !viewport_covers_output) {
                 // The geometry of this pass is still laid out for the game's original
                 // window, so it only reaches a fraction of the enlarged surface. Stretch
                 // the viewport by the same ratio to spread it over the whole surface.
@@ -1449,7 +1459,7 @@ void Rasterizer::UpdateViewportScissorState() const {
                 viewport.y *= vo_fit_y;
                 viewport.width *= vo_fit_x;
                 viewport.height *= vo_fit_y;
-            } else if (rt_fit_x > 1.001f) {
+            } else if (!output_upscaled && rt_fit_x > 1.001f) {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
                 viewport.x *= rt_fit_x;
