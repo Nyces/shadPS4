@@ -1164,11 +1164,13 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         if (logged_up.insert(up_key).second) {
             LOG_INFO(
                 Render_Vulkan,
-                "Upscaled RT pass: area={}x{}, cb0={}x{}, db={}x{}, depth={}, "
+                "Upscaled RT pass: area={}x{}, cb0={}x{} addr={:#x}, db={}x{}, depth={}, "
                 "vp=({},{},{},{}), screenScissor={}x{}, prim={}, clipDisabled={}",
                 state.width, state.height,
                 cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.width : 0,
                 cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.height : 0,
+                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.guest_address
+                                  : 0,
                 db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.width : 0,
                 db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.height : 0,
                 state.depth_stencil_attachment.has_depth, vp.xoffset, vp.yoffset, vp.xscale,
@@ -1446,7 +1448,13 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
-            if (output_upscaled) {
+            // A pass that draws into an offscreen target we enlarged is already working at
+            // the presentation scale, so it must not also take the window-to-surface
+            // ratio. Both conditions can hold at once when such a target is bound
+            // alongside the output surface, and applying both magnified the geometry to
+            // twice the surface and left the scene black.
+            const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
+            if (output_upscaled && !draws_into_enlarged_target) {
                 // The geometry of this pass is still laid out for the game's original
                 // window, so it only reaches a fraction of the enlarged surface. Stretch
                 // the viewport by the same ratio to spread it over the whole surface.
@@ -1458,7 +1466,7 @@ void Rasterizer::UpdateViewportScissorState() const {
                 viewport.y *= vo_fit_y;
                 viewport.width *= vo_fit_x;
                 viewport.height *= vo_fit_y;
-            } else if (rt_fit_x > 1.001f) {
+            } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
                 //
