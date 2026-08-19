@@ -109,6 +109,25 @@ bool Rasterizer::FilterDraw() {
     return true;
 }
 
+// Returns whether any stage of the pipeline samples a texture that starts at the given
+// address, which identifies a pass reading the same allocation it renders into.
+static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
+    if (address == 0) {
+        return false;
+    }
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        for (const auto& image_desc : stage->images) {
+            if (image_desc.GetSharp(*stage).Address() == address) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
@@ -150,10 +169,18 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // uploads and the cache lookup, so scaling them would describe a stride the
         // guest never wrote and the detiler would unpack garbage. Uploads clamp their
         // copy extent to the guest pitch, so leaving them alone is safe.
+        //
+        // A clip-disabled pass that samples the very allocation it draws into is an
+        // in-place blit. Those are harmless while the source and the destination are the
+        // same size, because the mapping is the identity, but enlarging the target turns
+        // it into a scaling blit that reads pixels it has already written, so the result
+        // collapses to black. Leave such targets at the size the game chose.
+        const bool in_place_blit =
+            regs.IsClipDisabled() && SamplesAddress(pipeline, col_buf.Address());
         if (const auto vo_ext = liverpool->GetVideoOutExtent();
-            vo_ext.Valid() && !liverpool->FindVideoOutSurface(col_buf.Address()) &&
-            desc.info.size.width > 0 && desc.info.size.height > 0 &&
-            desc.info.size.width * 2 == vo_ext.width &&
+            !in_place_blit && vo_ext.Valid() &&
+            !liverpool->FindVideoOutSurface(col_buf.Address()) && desc.info.size.width > 0 &&
+            desc.info.size.height > 0 && desc.info.size.width * 2 == vo_ext.width &&
             desc.info.size.height * 2 == vo_ext.height) {
             rt_fit_x = 2.0f;
             rt_fit_y = 2.0f;
@@ -1158,8 +1185,11 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         // rendered correctly but sampled wrong.
         static std::unordered_set<u64> logged_up;
         const auto& vp = liverpool->regs.viewports[0];
-        const u64 up_key = (u64(state.width) << 32) | (u64(state.height) << 16) |
-                           (u64(static_cast<u32>(liverpool->regs.primitive_type)) << 4) |
+        const VAddr cb0_addr =
+            cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.guest_address : 0;
+        const u64 up_key = (u64(cb0_addr) << 20) ^ (u64(state.width) << 12) ^
+                           (u64(static_cast<u32>(liverpool->regs.primitive_type)) << 4) ^
+                           (u64(u32(std::abs(vp.xscale))) << 32) ^
                            (state.depth_stencil_attachment.has_depth ? 1u : 0u);
         if (logged_up.insert(up_key).second) {
             LOG_INFO(
