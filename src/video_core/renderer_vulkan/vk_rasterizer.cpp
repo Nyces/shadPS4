@@ -862,10 +862,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // or it would create a second image over the same memory and sample an empty
             // one instead of the rendered contents. Only the extent is adjusted here as
             // well, to match how the target itself was enlarged.
-            if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address) &&
-                desc.info.size.width > 0 && desc.info.size.height > 0) {
-                desc.info.size.width *= 2;
-                desc.info.size.height *= 2;
+            //
+            // Repeat the extent check the render path used rather than trusting the
+            // address alone: these allocations are recycled for surfaces of other sizes,
+            // and enlarging one of those would look up an image that was never rendered.
+            if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address)) {
+                if (const auto vo_ext = liverpool->GetVideoOutExtent();
+                    vo_ext.Valid() && desc.info.size.width * 2 == vo_ext.width &&
+                    desc.info.size.height * 2 == vo_ext.height) {
+                    desc.info.size.width *= 2;
+                    desc.info.size.height *= 2;
+                }
             }
 
             image_id = texture_cache.FindImage(desc);
