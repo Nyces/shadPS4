@@ -171,6 +171,10 @@ private:
     // was enlarged to the presentation scale.
     mutable float rt_fit_x{1.0f};
     mutable float rt_fit_y{1.0f};
+    // Extent that target was enlarged to, used to tell whether the pass viewport already
+    // covers it and must not be stretched again.
+    mutable u32 rt_fit_width{};
+    mutable u32 rt_fit_height{};
     // Addresses of the offscreen targets that are being rendered at the presentation
     // scale. Shaders sampling them describe the original size, so the same adjustment has
     // to be applied on the sampling path or the lookup would miss the enlarged image.

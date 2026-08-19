@@ -121,6 +121,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     vo_pass = false;
     rt_fit_x = 1.0f;
     rt_fit_y = 1.0f;
+    rt_fit_width = 0;
+    rt_fit_height = 0;
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
@@ -157,6 +159,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             rt_fit_y = 2.0f;
             desc.info.size.width *= 2;
             desc.info.size.height *= 2;
+            rt_fit_width = desc.info.size.width;
+            rt_fit_height = desc.info.size.height;
             upscaled_targets.insert(desc.info.guest_address);
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
@@ -1442,30 +1446,37 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.y = yoffset - yscale;
             viewport.width = xscale * 2.0f;
             viewport.height = yscale * 2.0f;
-            // A pass whose viewport already spans the output surface needs no stretch:
-            // the resolution patch made the game lay this geometry out at the full size
-            // and scaling it again would magnify it past the surface, which is what left
-            // the scene as a black block. Only the passes still using the original window
-            // are missing the ratio.
-            const bool viewport_covers_output =
-                vo_surface_width > 0 && vo_surface_height > 0 &&
-                viewport.width >= float(vo_surface_width) * 0.999f &&
-                std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
-            if (output_upscaled && !viewport_covers_output) {
+            if (output_upscaled) {
                 // The geometry of this pass is still laid out for the game's original
                 // window, so it only reaches a fraction of the enlarged surface. Stretch
                 // the viewport by the same ratio to spread it over the whole surface.
+                //
+                // The viewport registers cannot tell which passes need this: the UI and
+                // the scene both arrive with a viewport already spanning the surface, yet
+                // the UI vertices only span the original window and do need the stretch.
                 viewport.x *= vo_fit_x;
                 viewport.y *= vo_fit_y;
                 viewport.width *= vo_fit_x;
                 viewport.height *= vo_fit_y;
-            } else if (!output_upscaled && rt_fit_x > 1.001f) {
+            } else if (rt_fit_x > 1.001f) {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
-                viewport.x *= rt_fit_x;
-                viewport.y *= rt_fit_y;
-                viewport.width *= rt_fit_x;
-                viewport.height *= rt_fit_y;
+                //
+                // Unless it already does: the scene passes arrive with a viewport the
+                // resolution patch already sized for the full target, and stretching
+                // that again pushed the geometry off the target and left the scene
+                // black. Compare against the enlarged target itself, because the
+                // scissor registers still describe the game's original window.
+                const bool already_full =
+                    rt_fit_width > 0 && rt_fit_height > 0 &&
+                    viewport.width >= float(rt_fit_width) * 0.999f &&
+                    std::abs(viewport.height) >= float(rt_fit_height) * 0.999f;
+                if (!already_full) {
+                    viewport.x *= rt_fit_x;
+                    viewport.y *= rt_fit_y;
+                    viewport.width *= rt_fit_x;
+                    viewport.height *= rt_fit_y;
+                }
             }
         }
 
