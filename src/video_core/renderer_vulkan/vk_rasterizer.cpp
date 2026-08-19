@@ -137,11 +137,16 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         }
         const auto& hint = liverpool->last_cb_extent[cb];
         std::construct_at(&desc, col_buf, hint);
-        // Offscreen targets the game sized for its own window keep the frame at that
-        // resolution even though the surface is larger, because the composition can only
-        // upscale what it is given. Render them at the presentation scale instead. The
-        // pitch has to grow along with the extent or the tiling math and the guest
-        // uploads would use a stride that no longer matches the image.
+        // The game sizes its offscreen scene targets for its own window, so the frame
+        // stays at that resolution no matter how large the output surface is: the
+        // composition can only upscale what it is given. Rasterize them at the
+        // presentation scale instead to get real detail rather than a stretched image.
+        //
+        // Only the host extent may grow. The pitch, the guest size and the mip layout
+        // describe how the allocation is laid out in guest memory and drive tiling,
+        // uploads and the cache lookup, so scaling them would describe a stride the
+        // guest never wrote and the detiler would unpack garbage. Uploads clamp their
+        // copy extent to the guest pitch, so leaving them alone is safe.
         if (const auto vo_ext = liverpool->GetVideoOutExtent();
             vo_ext.Valid() && !liverpool->FindVideoOutSurface(col_buf.Address()) &&
             desc.info.size.width > 0 && desc.info.size.height > 0 &&
@@ -151,8 +156,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             rt_fit_y = 2.0f;
             desc.info.size.width *= 2;
             desc.info.size.height *= 2;
-            desc.info.pitch *= 2;
-            desc.info.UpdateSize();
             upscaled_targets.insert(desc.info.guest_address);
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
@@ -254,11 +257,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                           htile_address, hint);
         if (rt_fit_x > 1.001f) {
             // Follow the enlarged color target, otherwise the smaller depth attachment
-            // would shrink the framebuffer back and crop the pass.
+            // would shrink the framebuffer back and crop the pass. As with the color
+            // target, only the host extent grows: the guest layout has to keep
+            // describing the allocation the game actually wrote.
             desc.info.size.width = u32(desc.info.size.width * rt_fit_x);
             desc.info.size.height = u32(desc.info.size.height * rt_fit_y);
-            desc.info.pitch = u32(desc.info.pitch * rt_fit_x);
-            desc.info.UpdateSize();
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
@@ -857,13 +860,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // A target that is rendered at the presentation scale is described by the
             // shader at its original size, so the lookup has to be adjusted the same way
             // or it would create a second image over the same memory and sample an empty
-            // one instead of the rendered contents.
+            // one instead of the rendered contents. Only the extent is adjusted here as
+            // well, to match how the target itself was enlarged.
             if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address) &&
                 desc.info.size.width > 0 && desc.info.size.height > 0) {
                 desc.info.size.width *= 2;
                 desc.info.size.height *= 2;
-                desc.info.pitch *= 2;
-                desc.info.UpdateSize();
             }
 
             image_id = texture_cache.FindImage(desc);
