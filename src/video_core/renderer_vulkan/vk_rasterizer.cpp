@@ -919,11 +919,16 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 if (logged_blit.insert(k).second) {
                     const auto& vp = liverpool->regs.viewports[0];
                     LOG_INFO(Render_Vulkan,
-                             "VideoOut composite: source {}x{} addr={:#x}, vp=({},{},{},{}), "
-                             "fit={}x{}, numIndices={}, prim={}",
+                             "VideoOut composite: source {}x{} addr={:#x}, pitch={}, "
+                             "guestSize={:#x}, gpuModified={}, cpuDirty={}, gpuDirty={}, "
+                             "vp=({},{},{},{}), fit={}x{}, numIndices={}, prim={}",
                              image.info.size.width, image.info.size.height,
-                             image.info.guest_address, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale,
-                             vo_fit_x, vo_fit_y, liverpool->regs.num_indices,
+                             image.info.guest_address, image.info.pitch, image.info.guest_size,
+                             True(image.flags & VideoCore::ImageFlagBits::GpuModified),
+                             True(image.flags & VideoCore::ImageFlagBits::CpuDirty),
+                             True(image.flags & VideoCore::ImageFlagBits::GpuDirty), vp.xoffset,
+                             vp.yoffset, vp.xscale, vp.yscale, vo_fit_x, vo_fit_y,
+                             liverpool->regs.num_indices,
                              static_cast<u32>(liverpool->regs.primitive_type));
                 }
             }
@@ -1131,6 +1136,41 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
         // matter how wide the scissor is. Keep the area at the output surface extent.
         state.width = std::max<u16>(state.width, vo_surface_width);
         state.height = std::max<u16>(state.height, vo_surface_height);
+    }
+
+    if (rt_fit_x > 1.001f) {
+        // The render area is the intersection of all attachments, so any attachment that
+        // was not enlarged along with the target shrinks it back and would crop the pass
+        // to the area of the original window. Keep the area at the enlarged extent.
+        if (cb_descs[0].first) {
+            const auto& cb0 = texture_cache.GetImage(cb_descs[0].first).info;
+            state.width = std::max<u32>(state.width, cb0.size.width);
+            state.height = std::max<u32>(state.height, cb0.size.height);
+        }
+
+        // Report what a pass drawing into an enlarged target actually gets, so a target
+        // that is never rendered at its new size can be told apart from one that is
+        // rendered correctly but sampled wrong.
+        static std::unordered_set<u64> logged_up;
+        const auto& vp = liverpool->regs.viewports[0];
+        const u64 up_key = (u64(state.width) << 32) | (u64(state.height) << 16) |
+                           (u64(static_cast<u32>(liverpool->regs.primitive_type)) << 4) |
+                           (state.depth_stencil_attachment.has_depth ? 1u : 0u);
+        if (logged_up.insert(up_key).second) {
+            LOG_INFO(
+                Render_Vulkan,
+                "Upscaled RT pass: area={}x{}, cb0={}x{}, db={}x{}, depth={}, "
+                "vp=({},{},{},{}), screenScissor={}x{}, prim={}, clipDisabled={}",
+                state.width, state.height,
+                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.width : 0,
+                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.height : 0,
+                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.width : 0,
+                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.height : 0,
+                state.depth_stencil_attachment.has_depth, vp.xoffset, vp.yoffset, vp.xscale,
+                vp.yscale, AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x),
+                AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y),
+                static_cast<u32>(liverpool->regs.primitive_type), liverpool->regs.IsClipDisabled());
+        }
     }
 
     if (vo_pass) {
