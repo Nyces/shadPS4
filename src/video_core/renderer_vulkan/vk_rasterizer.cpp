@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <bit>
 #include <cmath>
 #include <unordered_set>
 
@@ -569,22 +570,48 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
+    if (liverpool->regs.IsClipDisabled()) {
         // Clip-disabled passes pin the Vulkan viewport to the hardware window and turn
         // vertex positions into window coordinates inside the shader through push data
         // (see ConvertPositionToClipSpace), so the viewport stretch applied below can
         // never reach them and the conversion itself has to carry the scale.
         //
-        // The scene composition emits its quad as x in [-1, 0] and y in [-1, 1], so the
-        // conversion spans only xscale horizontally against 2*yscale vertically and the
-        // blit covers half the width of the target it draws into. Give the horizontal
-        // terms the extra factor of two on top of the surface ratio so the quad reaches
-        // the full extent on both axes.
-        const float fit_x = vo_fit_x * 2.0f;
-        push_data.xoffset *= fit_x;
-        push_data.xscale *= fit_x;
-        push_data.yoffset *= vo_fit_y;
-        push_data.yscale *= vo_fit_y;
+        // The composition shaders build their quad from VertexIndex as x in [-1, 1] and
+        // y in [-1, 1] with normalized 0..1 texture coordinates (verified in the dumps:
+        // the vertices are (-1,-1), (1,-1), (-1,1) with UV (0,1), (1,1), (0,0)), so the
+        // conversion spans 2*scale on both axes and the game's viewport registers already
+        // map that quad onto the whole target they were sized for. Multiplying the terms
+        // by the same ratio the target was enlarged by maps the identical quad onto the
+        // whole enlarged target instead; an extra factor would push half of it off-screen
+        // and leave the source sampled only halfway across.
+        if (output_upscaled) {
+            // A pass drawing into the output surface works at the presentation scale.
+            push_data.xoffset *= vo_fit_x;
+            push_data.xscale *= vo_fit_x;
+            push_data.yoffset *= vo_fit_y;
+            push_data.yscale *= vo_fit_y;
+        } else if (rt_fit_x > 1.001f) {
+            // A pass drawing into an offscreen target we enlarged is rasterized at the
+            // presentation scale as well: without the ratio its quad would only fill
+            // the corner of the target the game sized, and every pass sampling that
+            // target would read the shrunk scene next to uninitialized memory.
+            push_data.xoffset *= rt_fit_x;
+            push_data.xscale *= rt_fit_x;
+            push_data.yoffset *= rt_fit_y;
+            push_data.yscale *= rt_fit_y;
+            // Report every distinct pass the ratio is applied to, with the conversion
+            // it ends up with, to verify the quad then covers the enlarged target.
+            static std::unordered_set<u64> logged_pp;
+            const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
+                          (u64(std::bit_cast<u32>(push_data.xoffset)) << 2) ^
+                          u64(std::bit_cast<u32>(push_data.yscale));
+            if (logged_pp.insert(k).second) {
+                LOG_INFO(Render_Vulkan,
+                         "Upscaled RT clip-disabled pass: cb0={:#x}, fit={}x{}, push=({},{},{},{})",
+                         liverpool->regs.color_buffers[0].Address(), rt_fit_x, rt_fit_y,
+                         push_data.xoffset, push_data.yoffset, push_data.xscale, push_data.yscale);
+            }
+        }
     }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
@@ -947,7 +974,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 // Report what the scene composition reads and how its positions are
                 // converted, to tell apart a geometry problem from a sampling one.
                 static std::unordered_set<u64> logged_blit;
-                const u64 k = (u64(image.info.size.width) << 32) | image.info.size.height;
+                const u64 k = (u64(image.info.guest_address) << 24) ^
+                              (u64(image.info.size.width) << 12) ^ image.info.size.height;
                 if (logged_blit.insert(k).second) {
                     const auto& vp = liverpool->regs.viewports[0];
                     LOG_INFO(Render_Vulkan,
@@ -1501,14 +1529,17 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // scale, so the viewport has to cover the enlarged target.
                 //
                 // Unless it already does: the scene passes arrive with a viewport the
-                // resolution patch already sized for the full target, and stretching
-                // that again pushed the geometry off the target and left the scene
-                // black. Compare against the enlarged target itself, because the
-                // scissor registers still describe the game's original window.
+                // resolution patch already sized for the enlarged target (full size or a
+                // sub-region of it), and stretching that again pushed the geometry off
+                // the target and left the scene black. A pass still laid out for the
+                // game's original window cannot reach the enlarged extent on either
+                // axis, so either axis reaching it identifies a patched pass. Compare
+                // against the enlarged target itself, because the scissor registers
+                // still describe the game's original window.
                 const bool already_full =
                     rt_fit_width > 0 && rt_fit_height > 0 &&
-                    viewport.width >= float(rt_fit_width) * 0.999f &&
-                    std::abs(viewport.height) >= float(rt_fit_height) * 0.999f;
+                    (viewport.width >= float(rt_fit_width) * 0.999f ||
+                     std::abs(viewport.height) >= float(rt_fit_height) * 0.999f);
                 if (!already_full) {
                     viewport.x *= rt_fit_x;
                     viewport.y *= rt_fit_y;
