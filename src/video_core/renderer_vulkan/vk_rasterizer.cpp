@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cmath>
 #include <unordered_set>
 
 #include "common/debug.h"
@@ -214,9 +215,18 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 }
             }
             if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
-                vo_fit_x = vo_known_fit_x;
-                vo_fit_y = vo_known_fit_y;
-                output_upscaled = true;
+                // Only passes whose register viewport is still laid out for the
+                // original window may be stretched: stretching one that already
+                // covers the full surface (the patched UI passes) would magnify
+                // its geometry beyond the surface and crop the frame instead.
+                const float vp_w = std::abs(vp.xscale) * 2.0f;
+                const float vp_h = std::abs(vp.yscale) * 2.0f;
+                if (vp_w > 0.f && vp_h > 0.f && vp_w * vo_known_fit_x <= float(vo->width) * 1.25f &&
+                    vp_h * vo_known_fit_y <= float(vo->height) * 1.25f) {
+                    vo_fit_x = vo_known_fit_x;
+                    vo_fit_y = vo_known_fit_y;
+                    output_upscaled = true;
+                }
             }
             // Report every pass targeting the output surface, including the ones that
             // need no adjusting, so the whole composition can be reconstructed.
@@ -534,6 +544,20 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
+    if (output_upscaled && liverpool->regs.IsClipDisabled()) {
+        // Clip-disabled passes pin the Vulkan viewport to the hardware window and
+        // convert positions to window coordinates in the shader through push data
+        // (see ConvertPositionToClipSpace), so the stretch cannot go through the
+        // viewport and has to be carried by the conversion itself. Scaling the
+        // offsets together with the scales is a uniform affine map: it stretches
+        // the rectangle and its tessellation-interpolated fourth corner without
+        // distorting it, and keeps screen-space math reading the same constants
+        // consistent with the enlarged extent.
+        push_data.xoffset *= vo_fit_x;
+        push_data.xscale *= vo_fit_x;
+        push_data.yoffset *= vo_fit_y;
+        push_data.yscale *= vo_fit_y;
+    }
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;
