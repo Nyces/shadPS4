@@ -152,6 +152,31 @@ static bool SamplesUpscaledTarget(const GraphicsPipeline* pipeline,
     return false;
 }
 
+// Returns whether an allocation sized for the game's original window should be rasterized
+// at the presentation scale instead. The bloom chain the post-process pass reads is a
+// pyramid of HDR float targets whose aspect ratio matches the output surface and whose
+// width is smaller than it (1920x1080, 960x540, 480x270, ...). Enlarging only the top of
+// that pyramid left the rest at the original size, so the composition source was filled
+// from 1080p targets next to uninitialized memory and the scene came out black. Enlarge
+// every level of the pyramid by the same factor, which preserves the 2:1 ratio between
+// them. The aspect-ratio and HDR-float gates keep shadow maps, velocity fields and other
+// square or low-precision targets out.
+static bool ShouldEnlargeForPresentation(const VideoCore::TextureCache::ImageInfo& info,
+                                         const AmdGpu::CbDbExtent& vo_ext) {
+    if (!vo_ext.Valid() || info.size.width == 0 || info.size.height == 0) {
+        return false;
+    }
+    if (info.size.width >= vo_ext.width) {
+        return false;
+    }
+    const float target_aspect = float(vo_ext.width) / float(vo_ext.height);
+    const float this_aspect = float(info.size.width) / float(info.size.height);
+    if (std::abs(this_aspect - target_aspect) > 0.05f) {
+        return false;
+    }
+    return info.pixel_format == vk::Format::eR16G16B16A16Sfloat;
+}
+
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
@@ -203,14 +228,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const bool in_place_blit =
             regs.IsClipDisabled() && SamplesAddress(pipeline, col_buf.Address());
         if (const auto vo_ext = liverpool->GetVideoOutExtent();
-            !in_place_blit && vo_ext.Valid() &&
-            !liverpool->FindVideoOutSurface(col_buf.Address()) && desc.info.size.width > 0 &&
-            desc.info.size.height > 0 && desc.info.size.width * 2 == vo_ext.width &&
-            desc.info.size.height * 2 == vo_ext.height) {
-            rt_fit_x = 2.0f;
-            rt_fit_y = 2.0f;
-            desc.info.size.width *= 2;
-            desc.info.size.height *= 2;
+            !in_place_blit && !liverpool->FindVideoOutSurface(col_buf.Address()) &&
+            ShouldEnlargeForPresentation(desc.info, vo_ext)) {
+            // Enlarge every level of the bloom pyramid by the same ratio the surface grew
+            // by, so the 2:1 ratio between them is preserved and the composition source
+            // no longer fills from a level that stayed at the original size.
+            rt_fit_x = float(vo_ext.width) / float(desc.info.size.width);
+            rt_fit_y = float(vo_ext.height) / float(desc.info.size.height);
+            desc.info.size.width = vo_ext.width;
+            desc.info.size.height = vo_ext.height;
             rt_fit_width = desc.info.size.width;
             rt_fit_height = desc.info.size.height;
             upscaled_targets.insert(desc.info.guest_address);
@@ -974,11 +1000,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 const auto vo_ext = liverpool->GetVideoOutExtent();
                 sharp_width = desc.info.size.width;
                 sharp_height = desc.info.size.height;
-                sampling_adjusted = vo_ext.Valid() && desc.info.size.width * 2 == vo_ext.width &&
-                                    desc.info.size.height * 2 == vo_ext.height;
+                sampling_adjusted = ShouldEnlargeForPresentation(desc.info, vo_ext);
                 if (sampling_adjusted) {
-                    desc.info.size.width *= 2;
-                    desc.info.size.height *= 2;
+                    desc.info.size.width = vo_ext.width;
+                    desc.info.size.height = vo_ext.height;
                 }
                 report_sampling = true;
             }
