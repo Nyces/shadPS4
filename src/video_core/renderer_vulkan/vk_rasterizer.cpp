@@ -129,6 +129,28 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
     return false;
 }
 
+// Returns whether any stage samples one of the offscreen targets that are rendered at
+// the presentation scale. Such a pass is presenting the scene we already rasterized at
+// the full size, so its geometry needs no further stretching, while a pass that reads
+// none of them is drawing content still laid out for the game's original window.
+static bool SamplesUpscaledTarget(const GraphicsPipeline* pipeline,
+                                  const std::unordered_set<VAddr>& upscaled_targets) {
+    if (upscaled_targets.empty()) {
+        return false;
+    }
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        for (const auto& image_desc : stage->images) {
+            if (upscaled_targets.contains(image_desc.GetSharp(*stage).Address())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
@@ -139,6 +161,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     vo_fit_x = 1.0f;
     vo_fit_y = 1.0f;
     vo_pass = false;
+    presents_upscaled = false;
     rt_fit_x = 1.0f;
     rt_fit_y = 1.0f;
     rt_fit_width = 0;
@@ -249,15 +272,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                     vo_known_fit_y = float(vo->height) / float(scsr_h);
                 }
             }
-            // Apply the ratio to every pass targeting the surface. Neither the scissor
-            // nor the viewport registers can identify the passes that need it: the UI
-            // arrives with both already covering the full surface while its vertices
-            // only span the original window, so gating on either one shrinks the
-            // interface to a quarter of the screen (confirmed by testing both). The
-            // passes that must not be stretched are instead the ones drawing into an
-            // offscreen target we enlarged, which is handled where the viewport is
-            // built.
-            if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
+            // Apply the ratio to every pass targeting the surface, except the ones that
+            // are presenting a target we already rasterized at the presentation scale.
+            // The registers cannot make that distinction: the scene composition and the
+            // UI reach this point with identical viewport and scissor values, both
+            // already covering the full surface (the diagnostics show prim=6 and prim=4
+            // with vp=(1920,1080,1920,-1080) and screenScissor=3840x2160), which is why
+            // gating on either one shrank the interface to a quarter of the screen. What
+            // separates them is what they read: the composition samples the enlarged
+            // scene target, whose contents are already at the full size, so stretching
+            // it moved the viewport to 7680x4320 and pushed the scene off the surface,
+            // while the UI reads none of those targets and its vertices really do only
+            // span the original window.
+            presents_upscaled = SamplesUpscaledTarget(pipeline, upscaled_targets);
+            if (!presents_upscaled && (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f)) {
                 vo_fit_x = vo_known_fit_x;
                 vo_fit_y = vo_known_fit_y;
                 output_upscaled = true;
@@ -1621,7 +1649,7 @@ void Rasterizer::UpdateViewportScissorState() const {
             .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
         });
 
-        if (i == 0 && (output_upscaled || rt_fit_x > 1.001f)) {
+        if (i == 0 && (output_upscaled || rt_fit_x > 1.001f || presents_upscaled)) {
             // Report what is actually handed to Vulkan for the passes we adjust. The
             // register-level diagnostics above cannot show whether a pass ended up
             // covering its target, because the correction is applied here and in the
@@ -1635,13 +1663,13 @@ void Rasterizer::UpdateViewportScissorState() const {
                 LOG_INFO(Render_Vulkan,
                          "Final viewport: cb0={:#x}, prim={}, clipDisabled={}, vp=({},{} "
                          "{}x{}), scissor=({},{} {}x{}), voFit={}x{}, rtFit={}x{}, "
-                         "rtFitExtent={}x{}, outputUpscaled={}",
+                         "rtFitExtent={}x{}, outputUpscaled={}, presentsUpscaled={}",
                          liverpool->regs.color_buffers[0].Address(),
                          static_cast<u32>(regs.primitive_type), regs.IsClipDisabled(), viewport.x,
                          viewport.y, viewport.width, viewport.height, vp_scsr.top_left_x,
                          vp_scsr.top_left_y, vp_scsr.GetWidth(), vp_scsr.GetHeight(), vo_fit_x,
-                         vo_fit_y, rt_fit_x, rt_fit_y, rt_fit_width, rt_fit_height,
-                         output_upscaled);
+                         vo_fit_y, rt_fit_x, rt_fit_y, rt_fit_width, rt_fit_height, output_upscaled,
+                         presents_upscaled);
             }
         }
     }

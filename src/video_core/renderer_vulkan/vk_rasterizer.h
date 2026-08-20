@@ -182,6 +182,10 @@ private:
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
+    // Set while the current draw presents an offscreen target that was rendered at the
+    // presentation scale. Its contents are already at the full size, so it must not
+    // receive the window-to-surface ratio the other output passes need.
+    mutable bool presents_upscaled{};
 };
 
 } // namespace Vulkan
