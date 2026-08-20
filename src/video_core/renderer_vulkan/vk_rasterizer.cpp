@@ -3,6 +3,7 @@
 
 #include <bit>
 #include <cmath>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "common/debug.h"
@@ -221,9 +222,13 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         {
             // Report every distinct render target with the register state it was derived
             // from, to locate the ones the game still allocates at its original size.
+            // The address is part of the key: two allocations that happen to share a
+            // size and a format are distinct targets, and merging their reports hid
+            // the scene buffer behind another one of the same shape.
             static std::unordered_set<u64> logged_rt;
-            const u64 rt_key = (u64(image.info.size.width) << 40) |
-                               (u64(image.info.size.height) << 20) |
+            const u64 rt_key = (u64(col_buf.Address() >> 12) << 40) ^
+                               (u64(image.info.size.width) << 28) ^
+                               (u64(image.info.size.height) << 16) ^
                                u64(static_cast<u32>(image.info.pixel_format));
             if (logged_rt.insert(rt_key).second) {
                 LOG_INFO(Render_Vulkan,
@@ -272,20 +277,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                     vo_known_fit_y = float(vo->height) / float(scsr_h);
                 }
             }
-            // Apply the ratio to every pass targeting the surface, except the ones that
-            // are presenting a target we already rasterized at the presentation scale.
-            // The registers cannot make that distinction: the scene composition and the
-            // UI reach this point with identical viewport and scissor values, both
-            // already covering the full surface (the diagnostics show prim=6 and prim=4
-            // with vp=(1920,1080,1920,-1080) and screenScissor=3840x2160), which is why
-            // gating on either one shrank the interface to a quarter of the screen. What
-            // separates them is what they read: the composition samples the enlarged
-            // scene target, whose contents are already at the full size, so stretching
-            // it moved the viewport to 7680x4320 and pushed the scene off the surface,
-            // while the UI reads none of those targets and its vertices really do only
-            // span the original window.
+            // Apply the ratio to every pass targeting the surface. Excluding the passes
+            // that present an enlarged target was tried and moved the composition to the
+            // top-left quarter of the screen, which is where it lands with no scaling at
+            // all, so the ratio is what puts that blit over the whole surface and it is
+            // correct for every output pass. Keep tracking what the pass reads for the
+            // diagnostics, since that is the only thing separating the composition from
+            // the interface.
             presents_upscaled = SamplesUpscaledTarget(pipeline, upscaled_targets);
-            if (!presents_upscaled && (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f)) {
+            if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
                 vo_fit_x = vo_known_fit_x;
                 vo_fit_y = vo_known_fit_y;
                 output_upscaled = true;
@@ -966,36 +966,50 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // Repeat the extent check the render path used rather than trusting the
             // address alone: these allocations are recycled for surfaces of other sizes,
             // and enlarging one of those would look up an image that was never rendered.
+            bool report_sampling = false;
+            bool sampling_adjusted = false;
+            u32 sharp_width = 0;
+            u32 sharp_height = 0;
             if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address)) {
                 const auto vo_ext = liverpool->GetVideoOutExtent();
-                const bool matches = vo_ext.Valid() && desc.info.size.width * 2 == vo_ext.width &&
-                                     desc.info.size.height * 2 == vo_ext.height;
-                if (matches) {
+                sharp_width = desc.info.size.width;
+                sharp_height = desc.info.size.height;
+                sampling_adjusted = vo_ext.Valid() && desc.info.size.width * 2 == vo_ext.width &&
+                                    desc.info.size.height * 2 == vo_ext.height;
+                if (sampling_adjusted) {
                     desc.info.size.width *= 2;
                     desc.info.size.height *= 2;
                 }
-                // Report both outcomes: an enlarged target whose sampler describes an
-                // extent the render path would not have enlarged is looked up at the
-                // original size, which finds a second, never rendered image over the
-                // same memory and samples black. That is indistinguishable from a
-                // geometry problem without knowing the extent the shader asked for.
-                static std::unordered_set<u64> logged_smp;
-                const u64 k = (u64(desc.info.guest_address) << 24) ^
-                              (u64(desc.info.size.width) << 12) ^ desc.info.size.height;
-                if (logged_smp.insert(k).second) {
-                    LOG_INFO(Render_Vulkan,
-                             "Sampling upscaled target: addr={:#x}, sharp={}x{}, pitch={}, "
-                             "adjusted={}, lookup={}x{}, voExt={}x{}",
-                             desc.info.guest_address,
-                             matches ? desc.info.size.width / 2 : desc.info.size.width,
-                             matches ? desc.info.size.height / 2 : desc.info.size.height,
-                             desc.info.pitch, matches, desc.info.size.width, desc.info.size.height,
-                             vo_ext.width, vo_ext.height);
-                }
+                report_sampling = true;
             }
 
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
+
+            if (report_sampling) {
+                // Report the image the lookup actually resolved to, and keep reporting
+                // it periodically. Logging only the first occurrence hides the steady
+                // state behind the first frame, where the source has not been rendered
+                // yet and a black sample is expected. An adjusted descriptor can also
+                // resolve to a different image than the one the render path created,
+                // and a resolved extent that is not the enlarged one, or one without
+                // GpuModified, would each sample black with correct geometry.
+                static std::unordered_map<u64, u32> smp_hits;
+                const u64 k = (u64(desc.info.guest_address) << 24) ^
+                              (u64(desc.info.size.width) << 12) ^ desc.info.size.height;
+                if (++smp_hits[k] % 600 == 1) {
+                    LOG_INFO(Render_Vulkan,
+                             "Sampling upscaled target: addr={:#x}, sharp={}x{}, pitch={}, "
+                             "adjusted={}, lookup={}x{}, resolved={}x{}, gpuModified={}, "
+                             "cpuDirty={}",
+                             desc.info.guest_address, sharp_width, sharp_height, desc.info.pitch,
+                             sampling_adjusted, desc.info.size.width, desc.info.size.height,
+                             image->info.size.width, image->info.size.height,
+                             True(image->flags & VideoCore::ImageFlagBits::GpuModified),
+                             True(image->flags & VideoCore::ImageFlagBits::CpuDirty));
+                }
+            }
+
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
                 // Redirect the access to the actual depth-stencil buffer.
@@ -1030,13 +1044,36 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
+            if (rt_fit_x > 1.001f) {
+                // Report every image a pass drawing into an enlarged target reads. The
+                // scene has to reach the composition source through some chain of
+                // post-process passes, and an earlier report of the sampling side showed
+                // no pass ever reading the scene buffer itself, so the chain is not
+                // visible in the log at all. Log each input periodically, alongside the
+                // output it feeds, so the whole chain can be reconstructed.
+                static std::unordered_map<u64, u32> pp_hits;
+                const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
+                              (u64(image.info.guest_address) << 12) ^ image.info.size.width;
+                if (++pp_hits[k] % 600 == 1) {
+                    LOG_INFO(Render_Vulkan,
+                             "Post-process input: out={:#x}, reads {}x{} addr={:#x}, pitch={}, "
+                             "gpuModified={}, upscaled={}",
+                             liverpool->regs.color_buffers[0].Address(), image.info.size.width,
+                             image.info.size.height, image.info.guest_address, image.info.pitch,
+                             True(image.flags & VideoCore::ImageFlagBits::GpuModified),
+                             upscaled_targets.contains(image.info.guest_address));
+                }
+            }
+
             if (vo_pass && liverpool->regs.IsClipDisabled()) {
                 // Report what the scene composition reads and how its positions are
                 // converted, to tell apart a geometry problem from a sampling one.
-                static std::unordered_set<u64> logged_blit;
+                // Periodically, so the steady state is visible and not only the first
+                // frame, where the source has not been rendered yet.
+                static std::unordered_map<u64, u32> blit_hits;
                 const u64 k = (u64(image.info.guest_address) << 24) ^
                               (u64(image.info.size.width) << 12) ^ image.info.size.height;
-                if (logged_blit.insert(k).second) {
+                if (++blit_hits[k] % 600 == 1) {
                     const auto& vp = liverpool->regs.viewports[0];
                     LOG_INFO(Render_Vulkan,
                              "VideoOut composite: source {}x{} addr={:#x}, pitch={}, "
