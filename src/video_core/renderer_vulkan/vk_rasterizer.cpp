@@ -249,7 +249,19 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                     vo_known_fit_y = float(vo->height) / float(scsr_h);
                 }
             }
-            if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
+            // Only stretch the passes that are themselves still laid out for that
+            // window. The ratio is remembered across passes, but the decision to apply
+            // it must not be: the resolution patch converts some passes completely, and
+            // those arrive with their own scissor already covering the full surface
+            // alongside a viewport that spans it (the diagnostics show prim=4 with
+            // screenScissor=3840x2160 and vp=(1920,1080,1920,-1080), i.e. exactly
+            // 3840x2160). Doubling such a pass moved its viewport to 7680x4320 and
+            // pushed the scene off the surface, which is what left the frame black.
+            // A pass whose scissor is still the original window is the one whose
+            // geometry really only reaches a fraction of the surface.
+            const bool clips_to_window =
+                scsr_w > 0 && scsr_h > 0 && (scsr_w < vo->width || scsr_h < vo->height);
+            if (clips_to_window && (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f)) {
                 vo_fit_x = vo_known_fit_x;
                 vo_fit_y = vo_known_fit_y;
                 output_upscaled = true;
@@ -570,7 +582,12 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    if (liverpool->regs.IsClipDisabled()) {
+    if (!pipeline->IsCompute() && liverpool->regs.IsClipDisabled()) {
+        // Only the graphics path may consult the fit ratios. A dispatch does not go
+        // through PrepareRenderState, so on that path the ratios and the color buffer
+        // registers still describe whichever draw ran before it, and scaling by them
+        // would apply one pass' correction to an unrelated one.
+        //
         // Clip-disabled passes pin the Vulkan viewport to the hardware window and turn
         // vertex positions into window coordinates inside the shader through push data
         // (see ConvertPositionToClipSpace), so the viewport stretch applied below can
@@ -1528,14 +1545,18 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
                 //
-                // Unless it already does: the scene passes arrive with a viewport the
-                // resolution patch already sized for the enlarged target (full size or a
-                // sub-region of it), and stretching that again pushed the geometry off
-                // the target and left the scene black. A pass still laid out for the
+                // Unless the pass is already laid out for it: the resolution patch
+                // sizes the scene passes for the enlarged target, either fully or as
+                // a deliberate sub-region of it (the diagnostics show both
+                // vp=(1920,1080,1920,-1080) and vp=(768,1080,768,-1080) against a
+                // 3840x2160 target, the latter spanning the full height at 1536
+                // wide), and stretching those again pushed the geometry off the
+                // target and left the scene black. A pass still laid out for the
                 // game's original window cannot reach the enlarged extent on either
-                // axis, so either axis reaching it identifies a patched pass. Compare
-                // against the enlarged target itself, because the scissor registers
-                // still describe the game's original window.
+                // axis, so either axis reaching it identifies a patched pass and its
+                // remaining axis is a sub-region the game chose, not a shortfall.
+                // Compare against the enlarged target itself, because the scissor
+                // registers still describe the game's original window.
                 const bool already_full =
                     rt_fit_width > 0 && rt_fit_height > 0 &&
                     (viewport.width >= float(rt_fit_width) * 0.999f ||
@@ -1584,6 +1605,30 @@ void Rasterizer::UpdateViewportScissorState() const {
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
             .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
         });
+
+        if (i == 0 && (output_upscaled || rt_fit_x > 1.001f)) {
+            // Report what is actually handed to Vulkan for the passes we adjust. The
+            // register-level diagnostics above cannot show whether a pass ended up
+            // covering its target, because the correction is applied here and in the
+            // push data, so a geometry that leaves the target can only be told apart
+            // from one that fills it by the final values.
+            static std::unordered_set<u64> logged_vp;
+            const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
+                          (u64(std::bit_cast<u32>(viewport.width)) << 3) ^
+                          u64(std::bit_cast<u32>(viewport.height));
+            if (logged_vp.insert(k).second) {
+                LOG_INFO(Render_Vulkan,
+                         "Final viewport: cb0={:#x}, prim={}, clipDisabled={}, vp=({},{} "
+                         "{}x{}), scissor=({},{} {}x{}), voFit={}x{}, rtFit={}x{}, "
+                         "rtFitExtent={}x{}, outputUpscaled={}",
+                         liverpool->regs.color_buffers[0].Address(),
+                         static_cast<u32>(regs.primitive_type), regs.IsClipDisabled(), viewport.x,
+                         viewport.y, viewport.width, viewport.height, vp_scsr.top_left_x,
+                         vp_scsr.top_left_y, vp_scsr.GetWidth(), vp_scsr.GetHeight(), vo_fit_x,
+                         vo_fit_y, rt_fit_x, rt_fit_y, rt_fit_width, rt_fit_height,
+                         output_upscaled);
+            }
+        }
     }
 
     if (viewports.empty()) {
