@@ -161,7 +161,7 @@ static bool SamplesUpscaledTarget(const GraphicsPipeline* pipeline,
 // every level of the pyramid by the same factor, which preserves the 2:1 ratio between
 // them. The aspect-ratio and HDR-float gates keep shadow maps, velocity fields and other
 // square or low-precision targets out.
-static bool ShouldEnlargeForPresentation(const VideoCore::ImageInfo& info,
+static bool ShouldEnlargeForPresentation(const VideoCore::TextureCache::ImageInfo& info,
                                          const AmdGpu::CbDbExtent& vo_ext) {
     if (!vo_ext.Valid() || info.size.width == 0 || info.size.height == 0) {
         return false;
