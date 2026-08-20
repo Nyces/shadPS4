@@ -249,19 +249,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                     vo_known_fit_y = float(vo->height) / float(scsr_h);
                 }
             }
-            // Only stretch the passes that are themselves still laid out for that
-            // window. The ratio is remembered across passes, but the decision to apply
-            // it must not be: the resolution patch converts some passes completely, and
-            // those arrive with their own scissor already covering the full surface
-            // alongside a viewport that spans it (the diagnostics show prim=4 with
-            // screenScissor=3840x2160 and vp=(1920,1080,1920,-1080), i.e. exactly
-            // 3840x2160). Doubling such a pass moved its viewport to 7680x4320 and
-            // pushed the scene off the surface, which is what left the frame black.
-            // A pass whose scissor is still the original window is the one whose
-            // geometry really only reaches a fraction of the surface.
-            const bool clips_to_window =
-                scsr_w > 0 && scsr_h > 0 && (scsr_w < vo->width || scsr_h < vo->height);
-            if (clips_to_window && (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f)) {
+            // Apply the ratio to every pass targeting the surface. Neither the scissor
+            // nor the viewport registers can identify the passes that need it: the UI
+            // arrives with both already covering the full surface while its vertices
+            // only span the original window, so gating on either one shrinks the
+            // interface to a quarter of the screen (confirmed by testing both). The
+            // passes that must not be stretched are instead the ones drawing into an
+            // offscreen target we enlarged, which is handled where the viewport is
+            // built.
+            if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
                 vo_fit_x = vo_known_fit_x;
                 vo_fit_y = vo_known_fit_y;
                 output_upscaled = true;
@@ -943,11 +939,30 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // address alone: these allocations are recycled for surfaces of other sizes,
             // and enlarging one of those would look up an image that was never rendered.
             if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address)) {
-                if (const auto vo_ext = liverpool->GetVideoOutExtent();
-                    vo_ext.Valid() && desc.info.size.width * 2 == vo_ext.width &&
-                    desc.info.size.height * 2 == vo_ext.height) {
+                const auto vo_ext = liverpool->GetVideoOutExtent();
+                const bool matches = vo_ext.Valid() && desc.info.size.width * 2 == vo_ext.width &&
+                                     desc.info.size.height * 2 == vo_ext.height;
+                if (matches) {
                     desc.info.size.width *= 2;
                     desc.info.size.height *= 2;
+                }
+                // Report both outcomes: an enlarged target whose sampler describes an
+                // extent the render path would not have enlarged is looked up at the
+                // original size, which finds a second, never rendered image over the
+                // same memory and samples black. That is indistinguishable from a
+                // geometry problem without knowing the extent the shader asked for.
+                static std::unordered_set<u64> logged_smp;
+                const u64 k = (u64(desc.info.guest_address) << 24) ^
+                              (u64(desc.info.size.width) << 12) ^ desc.info.size.height;
+                if (logged_smp.insert(k).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "Sampling upscaled target: addr={:#x}, sharp={}x{}, pitch={}, "
+                             "adjusted={}, lookup={}x{}, voExt={}x{}",
+                             desc.info.guest_address,
+                             matches ? desc.info.size.width / 2 : desc.info.size.width,
+                             matches ? desc.info.size.height / 2 : desc.info.size.height,
+                             desc.info.pitch, matches, desc.info.size.width, desc.info.size.height,
+                             vo_ext.width, vo_ext.height);
                 }
             }
 
