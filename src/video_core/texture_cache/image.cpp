@@ -724,6 +724,16 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, mrt1_range);
 
     const auto [src_layers, dst_layers] = SanitizeCopyLayers(src_image.info, info, 1);
+    // The region has to fit inside both images. Taking it from the destination alone
+    // describes an area the source may not have when the two were created at different
+    // extents, and a region reaching past the source is invalid usage that drops the
+    // transfer or faults the device. Clamp to what both sides hold, the way the plain
+    // copy paths do.
+    const vk::Extent3D resolve_extent = {
+        std::min(info.size.width, src_image.info.size.width),
+        std::min(info.size.height, src_image.info.size.height),
+        1,
+    };
     if (src_image.backing->num_samples == 1) {
         const vk::ImageCopy region = {
             .srcSubresource{
@@ -740,7 +750,7 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                 .layerCount = dst_layers,
             },
             .dstOffset = {0, 0, 0},
-            .extent = {info.size.width, info.size.height, 1},
+            .extent = resolve_extent,
         };
         scheduler->CommandBuffer().copyImage(src_image.GetImage(),
                                              vk::ImageLayout::eTransferSrcOptimal, GetImage(),
@@ -761,7 +771,7 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                 .layerCount = dst_layers,
             },
             .dstOffset = {0, 0, 0},
-            .extent = {info.size.width, info.size.height, 1},
+            .extent = resolve_extent,
         };
         scheduler->CommandBuffer().resolveImage(src_image.GetImage(),
                                                 vk::ImageLayout::eTransferSrcOptimal, GetImage(),

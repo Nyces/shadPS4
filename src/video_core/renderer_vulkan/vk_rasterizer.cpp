@@ -152,6 +152,30 @@ static bool SamplesUpscaledTarget(const GraphicsPipeline* pipeline,
     return false;
 }
 
+// Enlarges a color target descriptor to the presentation scale when it is one of the
+// offscreen targets the game sized for its own window. The render path, the sampling
+// path and the resolve path all have to agree on which targets are enlarged and by how
+// much: each of them looks images up by extent, so a path that describes a target at a
+// different size than the one it was created at looks up a second image over the same
+// memory and reads or writes an allocation nobody else touches.
+//
+// The output surface itself is excluded: it is already sized for presentation, and the
+// composition draws into it from the enlarged targets.
+void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const {
+    const auto vo_ext = liverpool->GetVideoOutExtent();
+    if (!vo_ext.Valid() || desc.info.size.width == 0 || desc.info.size.height == 0) {
+        return;
+    }
+    if (liverpool->FindVideoOutSurface(desc.info.guest_address)) {
+        return;
+    }
+    if (desc.info.size.width * 2 != vo_ext.width || desc.info.size.height * 2 != vo_ext.height) {
+        return;
+    }
+    desc.info.size.width *= 2;
+    desc.info.size.height *= 2;
+}
+
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
@@ -202,18 +226,17 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // collapses to black. Leave such targets at the size the game chose.
         const bool in_place_blit =
             regs.IsClipDisabled() && SamplesAddress(pipeline, col_buf.Address());
-        if (const auto vo_ext = liverpool->GetVideoOutExtent();
-            !in_place_blit && vo_ext.Valid() &&
-            !liverpool->FindVideoOutSurface(col_buf.Address()) && desc.info.size.width > 0 &&
-            desc.info.size.height > 0 && desc.info.size.width * 2 == vo_ext.width &&
-            desc.info.size.height * 2 == vo_ext.height) {
-            rt_fit_x = 2.0f;
-            rt_fit_y = 2.0f;
-            desc.info.size.width *= 2;
-            desc.info.size.height *= 2;
-            rt_fit_width = desc.info.size.width;
-            rt_fit_height = desc.info.size.height;
-            upscaled_targets.insert(desc.info.guest_address);
+        if (const u32 sharp_width = desc.info.size.width; !in_place_blit) {
+            // Go through the shared rule so the resolve path, which rebuilds these
+            // descriptors from the same registers, enlarges exactly the same targets.
+            ApplyPresentationScale(desc);
+            if (desc.info.size.width != sharp_width) {
+                rt_fit_x = 2.0f;
+                rt_fit_y = 2.0f;
+                rt_fit_width = desc.info.size.width;
+                rt_fit_height = desc.info.size.height;
+                upscaled_targets.insert(desc.info.guest_address);
+            }
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
@@ -234,7 +257,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 LOG_INFO(Render_Vulkan,
                          "RT: {}x{} fmt={} addr={:#x} pitch={} regPitch={} regHeight={} "
                          "hint={}x{} valid={} scsr={}x{} tileMax={} sliceMax={} tileMode={} "
-                         "sliceSize={:#x}",
+                         "sliceSize={:#x} guestSize={:#x} samples={} upscaled={}",
                          image.info.size.width, image.info.size.height,
                          vk::to_string(image.info.pixel_format), col_buf.Address(),
                          image.info.pitch, col_buf.Pitch(), col_buf.Height(), hint.width,
@@ -242,7 +265,9 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                          AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x),
                          AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y),
                          col_buf.pitch.tile_max, col_buf.slice.tile_max,
-                         static_cast<u32>(col_buf.GetTileMode()), col_buf.GetColorSliceSize());
+                         static_cast<u32>(col_buf.GetTileMode()), col_buf.GetColorSliceSize(),
+                         image.info.guest_size, image.info.num_samples,
+                         upscaled_targets.contains(image.info.guest_address));
             }
         }
 
@@ -971,15 +996,12 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             u32 sharp_width = 0;
             u32 sharp_height = 0;
             if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address)) {
-                const auto vo_ext = liverpool->GetVideoOutExtent();
                 sharp_width = desc.info.size.width;
                 sharp_height = desc.info.size.height;
-                sampling_adjusted = vo_ext.Valid() && desc.info.size.width * 2 == vo_ext.width &&
-                                    desc.info.size.height * 2 == vo_ext.height;
-                if (sampling_adjusted) {
-                    desc.info.size.width *= 2;
-                    desc.info.size.height *= 2;
-                }
+                // Go through the same rule the render and the resolve paths use, so the
+                // lookup describes the target at the extent it was created at.
+                ApplyPresentationScale(desc);
+                sampling_adjusted = desc.info.size.width != sharp_width;
                 report_sampling = true;
             }
 
@@ -1363,8 +1385,36 @@ void Rasterizer::Resolve() {
     const auto& mrt1_hint = liverpool->last_cb_extent[1];
     VideoCore::TextureCache::ImageDesc mrt0_desc{liverpool->regs.color_buffers[0], mrt0_hint};
     VideoCore::TextureCache::ImageDesc mrt1_desc{liverpool->regs.color_buffers[1], mrt1_hint};
+    // The resolve pass hands the multisampled scene to the single-sampled buffer the
+    // post-process chain reads. The render path enlarges the offscreen targets to the
+    // presentation scale, so both sides of this transfer have to be looked up at that
+    // scale as well: rebuilding the descriptors from the registers alone describes them
+    // at the size the game chose, which would look up a second image over the same
+    // memory for the source and leave the destination at the original size, so the
+    // enlarged scene would be resolved into a quarter-sized buffer and everything
+    // downstream of it would read an image that was never written.
+    ApplyPresentationScale(mrt0_desc);
+    ApplyPresentationScale(mrt1_desc);
     auto& mrt0_image = texture_cache.GetImage(texture_cache.FindImage(mrt0_desc, true));
     auto& mrt1_image = texture_cache.GetImage(texture_cache.FindImage(mrt1_desc, true));
+
+    {
+        static std::unordered_set<u64> logged_resolve;
+        const u64 k = (u64(mrt0_desc.info.guest_address >> 12) << 24) ^
+                      (u64(mrt1_desc.info.guest_address >> 12) << 4) ^
+                      u64(mrt0_image.info.size.width);
+        if (logged_resolve.insert(k).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Resolve: mrt0={}x{} addr={:#x} samples={}, mrt1={}x{} addr={:#x} "
+                     "samples={}, requested {}x{} -> {}x{}",
+                     mrt0_image.info.size.width, mrt0_image.info.size.height,
+                     mrt0_image.info.guest_address, mrt0_image.info.num_samples,
+                     mrt1_image.info.size.width, mrt1_image.info.size.height,
+                     mrt1_image.info.guest_address, mrt1_image.info.num_samples,
+                     mrt0_desc.info.size.width, mrt0_desc.info.size.height,
+                     mrt1_desc.info.size.width, mrt1_desc.info.size.height);
+        }
+    }
 
     ScopeMarkerBegin(fmt::format("Resolve:MRT0={:#x}:MRT1={:#x}",
                                  liverpool->regs.color_buffers[0].Address(),

@@ -86,6 +86,7 @@ public:
     }
 
 private:
+    void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const;
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();
