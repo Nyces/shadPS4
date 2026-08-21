@@ -1393,8 +1393,22 @@ void Rasterizer::Resolve() {
     // memory for the source and leave the destination at the original size, so the
     // enlarged scene would be resolved into a quarter-sized buffer and everything
     // downstream of it would read an image that was never written.
+    const u32 mrt0_sharp_width = mrt0_desc.info.size.width;
+    const u32 mrt1_sharp_width = mrt1_desc.info.size.width;
     ApplyPresentationScale(mrt0_desc);
     ApplyPresentationScale(mrt1_desc);
+    // Record both sides the way the render path records the targets it enlarges. The
+    // destination of a resolve never goes through the render path, so nothing else
+    // would ever record it, and the post-process passes reading it describe it at the
+    // size the game chose: without the record the sampling path leaves those lookups
+    // alone and they resolve to a second, never written image over the same memory,
+    // which is what kept the scene black even once the resolve itself was correct.
+    if (mrt0_desc.info.size.width != mrt0_sharp_width) {
+        upscaled_targets.insert(mrt0_desc.info.guest_address);
+    }
+    if (mrt1_desc.info.size.width != mrt1_sharp_width) {
+        upscaled_targets.insert(mrt1_desc.info.guest_address);
+    }
     auto& mrt0_image = texture_cache.GetImage(texture_cache.FindImage(mrt0_desc, true));
     auto& mrt1_image = texture_cache.GetImage(texture_cache.FindImage(mrt1_desc, true));
 
@@ -1406,13 +1420,14 @@ void Rasterizer::Resolve() {
         if (logged_resolve.insert(k).second) {
             LOG_INFO(Render_Vulkan,
                      "Resolve: mrt0={}x{} addr={:#x} samples={}, mrt1={}x{} addr={:#x} "
-                     "samples={}, requested {}x{} -> {}x{}",
+                     "samples={}, requested {}x{} -> {}x{}, recorded={}",
                      mrt0_image.info.size.width, mrt0_image.info.size.height,
                      mrt0_image.info.guest_address, mrt0_image.info.num_samples,
                      mrt1_image.info.size.width, mrt1_image.info.size.height,
                      mrt1_image.info.guest_address, mrt1_image.info.num_samples,
                      mrt0_desc.info.size.width, mrt0_desc.info.size.height,
-                     mrt1_desc.info.size.width, mrt1_desc.info.size.height);
+                     mrt1_desc.info.size.width, mrt1_desc.info.size.height,
+                     upscaled_targets.contains(mrt1_desc.info.guest_address));
         }
     }
 
