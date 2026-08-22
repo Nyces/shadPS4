@@ -1773,32 +1773,31 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
                 //
-                // Unless the pass is already laid out for it: the resolution patch
-                // sizes the scene passes for the enlarged target, either fully or as
-                // a deliberate sub-region of it (the diagnostics show both
-                // vp=(1920,1080,1920,-1080) and vp=(768,1080,768,-1080) against a
-                // 3840x2160 target, the latter spanning the full height at 1536
-                // wide), and stretching those again pushed the geometry off the
-                // target and left the scene black. A pass still laid out for the
-                // game's original window cannot reach the enlarged extent on either
-                // axis, so either axis reaching it identifies a patched pass and its
-                // remaining axis is a sub-region the game chose, not a shortfall.
+                // The patch does not convert a pass as a whole. The scene passes show
+                // vp=(1920,1080,1920,-1080) with both axes converted, and
+                // vp=(768,1080,768,-1080) with only the vertical one: 540 became 1080
+                // while 768 stayed as it was. Scaling such a pass on both axes pushes
+                // the converted one off the target, and skipping it entirely leaves the
+                // missed one at half the width it should cover, which is what squeezed
+                // the character horizontally.
                 //
-                // Deciding this per axis was tried and is wrong: it widened the
-                // narrow pass from the 40% of the target it occupies unpatched to
-                // 80%, because that pass is fully converted and its width is a
-                // deliberate band, not a shortfall.
-                //
-                // Compare against the enlarged target itself, because the scissor
-                // registers still describe the game's original window.
-                const bool already_full =
-                    rt_fit_width > 0 && rt_fit_height > 0 &&
-                    (viewport.width >= float(rt_fit_width) * 0.999f ||
-                     std::abs(viewport.height) >= float(rt_fit_height) * 0.999f);
-                if (!already_full) {
+                // The scissor the game writes is the reference. It always describes the
+                // region in the coordinates of the original window, so an axis whose
+                // viewport already spans that region times the ratio is converted, and
+                // one that still matches the bare region is not. Decide per axis on
+                // that basis.
+                const float scsr_w = float(regs.screen_scissor.GetWidth());
+                const float scsr_h = float(regs.screen_scissor.GetHeight());
+                const bool converted_x =
+                    scsr_w > 0.0f && viewport.width >= scsr_w * rt_fit_x * 0.999f;
+                const bool converted_y =
+                    scsr_h > 0.0f && std::abs(viewport.height) >= scsr_h * rt_fit_y * 0.999f;
+                if (!converted_x) {
                     viewport.x *= rt_fit_x;
-                    viewport.y *= rt_fit_y;
                     viewport.width *= rt_fit_x;
+                }
+                if (!converted_y) {
+                    viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
                 }
             }
