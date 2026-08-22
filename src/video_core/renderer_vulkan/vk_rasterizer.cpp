@@ -161,7 +161,71 @@ static bool SamplesUpscaledTarget(const GraphicsPipeline* pipeline,
 //
 // The output surface itself is excluded: it is already sized for presentation, and the
 // composition draws into it from the enlarged targets.
+//
+// Enlarging is only correct while a resolution patch is active, which is what makes the
+// game render into a surface larger than the window its passes are built for. Without
+// one, the surface and the window agree and nothing is missing any scale.
+//
+// The ratio is the surface against that one window, and the window has to be identified
+// before the ratio means anything. Deriving it from each pass' own scissor does not
+// work: the game deliberately renders its bloom chain at half, quarter and eighth of
+// the window, so every one of those levels reports a ratio that would scale it to the
+// full surface. Enlarging them blurred the whole frame, which is the ghosting seen at
+// 1080p, where the surface equals the window and nothing should have been touched at
+// all.
+//
+// The window is the region the game's own passes clip to. Take it only from passes
+// drawing into an offscreen target: the ones drawing into the output surface clip to the
+// surface itself and would report the window as being the surface, collapsing the ratio
+// to one.
+//
+// Require the candidate to cover more than half the surface. The bloom chain clips to a
+// half, a quarter and an eighth of the window on purpose, and any of those would answer
+// with a whole ratio of its own (a 960-wide level reports 4x against a 3840 surface),
+// which is what enlarged them to the full frame and blurred it.
+void Rasterizer::RecordGuestWindow(u32 scissor_width, u32 scissor_height) {
+    const auto vo_ext = liverpool->GetVideoOutExtent();
+    if (!vo_ext.Valid() || scissor_width == 0 || scissor_height == 0) {
+        return;
+    }
+    if (scissor_width > vo_ext.width || scissor_height > vo_ext.height) {
+        return;
+    }
+    if (scissor_width * 2 < vo_ext.width || scissor_height * 2 < vo_ext.height) {
+        return;
+    }
+    const u32 prev_width = guest_window_width;
+    const u32 prev_height = guest_window_height;
+    guest_window_width = std::max(guest_window_width, scissor_width);
+    guest_window_height = std::max(guest_window_height, scissor_height);
+    if (guest_window_width != prev_width || guest_window_height != prev_height) {
+        LOG_INFO(Render_Vulkan, "Guest window: {}x{} against surface {}x{}, presentation scale {}",
+                 guest_window_width, guest_window_height, vo_ext.width, vo_ext.height,
+                 PresentationScale());
+    }
+}
+
+float Rasterizer::PresentationScale() const {
+    const auto vo_ext = liverpool->GetVideoOutExtent();
+    if (!vo_ext.Valid() || guest_window_width == 0 || guest_window_height == 0) {
+        return 1.0f;
+    }
+    const float fit_x = float(vo_ext.width) / float(guest_window_width);
+    const float fit_y = float(vo_ext.height) / float(guest_window_height);
+    // Only a uniform enlargement is handled, and only a whole one: the patch doubles
+    // both axes together, and a fractional ratio would describe a window the geometry
+    // was never laid out for.
+    if (std::abs(fit_x - fit_y) > 0.01f || std::abs(fit_x - std::round(fit_x)) > 0.01f) {
+        return 1.0f;
+    }
+    return fit_x;
+}
+
 void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const {
+    const float fit = PresentationScale();
+    if (fit <= 1.001f) {
+        return;
+    }
     const auto vo_ext = liverpool->GetVideoOutExtent();
     if (!vo_ext.Valid() || desc.info.size.width == 0 || desc.info.size.height == 0) {
         return;
@@ -169,11 +233,15 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     if (liverpool->FindVideoOutSurface(desc.info.guest_address)) {
         return;
     }
-    if (desc.info.size.width * 2 != vo_ext.width || desc.info.size.height * 2 != vo_ext.height) {
+    // Only the targets the game sized for exactly that window are missing the scale.
+    // A target it allocated at some other size is a deliberate choice, and the passes
+    // reading it scale their coordinates themselves.
+    if (desc.info.size.width != guest_window_width ||
+        desc.info.size.height != guest_window_height) {
         return;
     }
-    desc.info.size.width *= 2;
-    desc.info.size.height *= 2;
+    desc.info.size.width = vo_ext.width;
+    desc.info.size.height = vo_ext.height;
 }
 
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
@@ -194,6 +262,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
+    }
+
+    // Identify the window the game's geometry is laid out for before any target is
+    // looked up, because the enlargement rule is derived from it. Only offscreen passes
+    // describe that window; a pass drawing into the output surface clips to the surface.
+    if (const auto& cb0 = regs.color_buffers[0];
+        cb0 && !liverpool->FindVideoOutSurface(cb0.Address())) {
+        RecordGuestWindow(AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x),
+                          AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y));
     }
 
     const bool skip_cb_binding =
@@ -226,13 +303,14 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // collapses to black. Leave such targets at the size the game chose.
         const bool in_place_blit =
             regs.IsClipDisabled() && SamplesAddress(pipeline, col_buf.Address());
-        if (const u32 sharp_width = desc.info.size.width; !in_place_blit) {
+        if (const u32 sharp_width = desc.info.size.width, sharp_height = desc.info.size.height;
+            !in_place_blit) {
             // Go through the shared rule so the resolve path, which rebuilds these
             // descriptors from the same registers, enlarges exactly the same targets.
             ApplyPresentationScale(desc);
             if (desc.info.size.width != sharp_width) {
-                rt_fit_x = 2.0f;
-                rt_fit_y = 2.0f;
+                rt_fit_x = float(desc.info.size.width) / float(sharp_width);
+                rt_fit_y = float(desc.info.size.height) / float(sharp_height);
                 rt_fit_width = desc.info.size.width;
                 rt_fit_height = desc.info.size.height;
                 upscaled_targets.insert(desc.info.guest_address);
@@ -673,9 +751,11 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                           u64(std::bit_cast<u32>(push_data.yscale));
             if (logged_pp.insert(k).second) {
                 LOG_INFO(Render_Vulkan,
-                         "Upscaled RT clip-disabled pass: cb0={:#x}, fit={}x{}, push=({},{},{},{})",
+                         "Upscaled RT clip-disabled pass: cb0={:#x}, fit={}x{}, "
+                         "rtFitExtent={}x{}, push=({},{},{},{})",
                          liverpool->regs.color_buffers[0].Address(), rt_fit_x, rt_fit_y,
-                         push_data.xoffset, push_data.yoffset, push_data.xscale, push_data.yscale);
+                         rt_fit_width, rt_fit_height, push_data.xoffset, push_data.yoffset,
+                         push_data.xscale, push_data.yscale);
             }
         }
     }
@@ -1682,6 +1762,9 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // The viewport registers cannot tell which passes need this: the UI and
                 // the scene both arrive with a viewport already spanning the surface, yet
                 // the UI vertices only span the original window and do need the stretch.
+                // Gating this on the viewport extent was tried and shrank the interface
+                // to a quarter of the frame, the same regression the scissor-based gate
+                // produced, so every pass targeting the surface takes the ratio.
                 viewport.x *= vo_fit_x;
                 viewport.y *= vo_fit_y;
                 viewport.width *= vo_fit_x;
@@ -1700,6 +1783,12 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // game's original window cannot reach the enlarged extent on either
                 // axis, so either axis reaching it identifies a patched pass and its
                 // remaining axis is a sub-region the game chose, not a shortfall.
+                //
+                // Deciding this per axis was tried and is wrong: it widened the
+                // narrow pass from the 40% of the target it occupies unpatched to
+                // 80%, because that pass is fully converted and its width is a
+                // deliberate band, not a shortfall.
+                //
                 // Compare against the enlarged target itself, because the scissor
                 // registers still describe the game's original window.
                 const bool already_full =

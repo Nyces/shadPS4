@@ -86,6 +86,8 @@ public:
     }
 
 private:
+    void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
+    float PresentationScale() const;
     void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const;
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
@@ -168,6 +170,11 @@ private:
     // the passes whose own scissor registers were already updated to the full surface.
     float vo_known_fit_x{1.0f};
     float vo_known_fit_y{1.0f};
+    // The window the game's own passes clip to, which is what its geometry is laid out
+    // for. The ratio between it and the output surface is the scale a resolution patch
+    // left the offscreen targets missing, and it is one when no patch is active.
+    u32 guest_window_width{};
+    u32 guest_window_height{};
     // Ratio applied to the current pass because it renders into an offscreen target that
     // was enlarged to the presentation scale.
     mutable float rt_fit_x{1.0f};
