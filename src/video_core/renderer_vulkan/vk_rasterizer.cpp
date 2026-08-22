@@ -1759,36 +1759,16 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // window, so it only reaches a fraction of the enlarged surface. Stretch
                 // the viewport by the same ratio to spread it over the whole surface.
                 //
-                // Only the axes that fall short of the surface, though. A clip-enabled
-                // pass maps NDC through its viewport, so one whose viewport already spans
-                // the surface fills it exactly, and stretching that viewport magnifies
-                // the content past the surface until only its top-left quarter lands on
-                // screen. The diagnostics show exactly that: the game draws 3D content
-                // straight into the output surface with converted registers
-                // (vp=(1920,1080,1920,-1080) against a 3840x2160 surface), and the
-                // unconditional ratio turned those into 7680x4320 while the identical
-                // first pass of the frame, which runs before the ratio is known and so
-                // escapes it, renders correctly.
-                //
-                // The interface cannot regress from this restriction: it reaches the
-                // surface through clip-disabled quads whose push data spans the old
-                // window, and those take the ratio in BindResources, a path this
-                // branch never touches. The scissor-based gate that once shrank the
-                // interface removed the ratio from that push path as well, which is
-                // what actually broke it.
-                const bool covers_x =
-                    vo_surface_width > 0 && viewport.width >= float(vo_surface_width) * 0.999f;
-                const bool covers_y =
-                    vo_surface_height > 0 &&
-                    std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
-                if (!covers_x) {
-                    viewport.x *= vo_fit_x;
-                    viewport.width *= vo_fit_x;
-                }
-                if (!covers_y) {
-                    viewport.y *= vo_fit_y;
-                    viewport.height *= vo_fit_y;
-                }
+                // The viewport registers cannot tell which passes need this: the UI and
+                // the scene both arrive with a viewport already spanning the surface, yet
+                // the UI vertices only span the original window and do need the stretch.
+                // Gating this on the viewport extent was tried and shrank the interface
+                // to a quarter of the frame, the same regression the scissor-based gate
+                // produced, so every pass targeting the surface takes the ratio.
+                viewport.x *= vo_fit_x;
+                viewport.y *= vo_fit_y;
+                viewport.width *= vo_fit_x;
+                viewport.height *= vo_fit_y;
             } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
