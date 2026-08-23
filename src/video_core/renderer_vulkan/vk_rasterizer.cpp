@@ -1167,28 +1167,35 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 }
             }
 
-            if (vo_pass && liverpool->regs.IsClipDisabled()) {
-                // Report what the scene composition reads and how its positions are
-                // converted, to tell apart a geometry problem from a sampling one.
-                // Periodically, so the steady state is visible and not only the first
-                // frame, where the source has not been rendered yet.
+            if (vo_pass) {
+                // Report what every pass targeting the output surface reads, and how its
+                // positions are converted, to tell apart a geometry problem from a
+                // sampling one. Periodically, so the steady state is visible and not only
+                // the first frame, where the source has not been rendered yet.
+                //
+                // Clip-enabled passes are included. The game draws 3D content straight
+                // into the surface with a real projection, and restricting this report to
+                // the clip-disabled blits hid those passes entirely, which is what left
+                // the source of the scene magnification invisible in the log.
                 static std::unordered_map<u64, u32> blit_hits;
                 const u64 k = (u64(image.info.guest_address) << 24) ^
-                              (u64(image.info.size.width) << 12) ^ image.info.size.height;
+                              (u64(image.info.size.width) << 12) ^ image.info.size.height ^
+                              (u64(static_cast<u32>(liverpool->regs.primitive_type)) << 40);
                 if (++blit_hits[k] % 600 == 1) {
                     const auto& vp = liverpool->regs.viewports[0];
                     LOG_INFO(Render_Vulkan,
-                             "VideoOut composite: source {}x{} addr={:#x}, pitch={}, "
-                             "guestSize={:#x}, gpuModified={}, cpuDirty={}, gpuDirty={}, "
-                             "vp=({},{},{},{}), fit={}x{}, numIndices={}, prim={}",
+                             "VideoOut source: reads {}x{} addr={:#x}, pitch={}, "
+                             "guestSize={:#x}, gpuModified={}, upscaled={}, "
+                             "vp=({},{},{},{}), fit={}x{}, numIndices={}, prim={}, "
+                             "clipDisabled={}",
                              image.info.size.width, image.info.size.height,
                              image.info.guest_address, image.info.pitch, image.info.guest_size,
                              True(image.flags & VideoCore::ImageFlagBits::GpuModified),
-                             True(image.flags & VideoCore::ImageFlagBits::CpuDirty),
-                             True(image.flags & VideoCore::ImageFlagBits::GpuDirty), vp.xoffset,
+                             upscaled_targets.contains(image.info.guest_address), vp.xoffset,
                              vp.yoffset, vp.xscale, vp.yscale, vo_fit_x, vo_fit_y,
                              liverpool->regs.num_indices,
-                             static_cast<u32>(liverpool->regs.primitive_type));
+                             static_cast<u32>(liverpool->regs.primitive_type),
+                             liverpool->regs.IsClipDisabled());
                 }
             }
 
@@ -1845,10 +1852,17 @@ void Rasterizer::UpdateViewportScissorState() const {
             // covering its target, because the correction is applied here and in the
             // push data, so a geometry that leaves the target can only be told apart
             // from one that fills it by the final values.
+            // The primitive type and what the pass reads are part of the key. Two passes
+            // targeting the same surface can end up with an identical viewport while
+            // needing opposite treatment: the interface and the pass presenting the
+            // scene both arrive with the same registers, and keying on the extent alone
+            // reported only whichever came first and hid the other completely.
             static std::unordered_set<u64> logged_vp;
-            const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
-                          (u64(std::bit_cast<u32>(viewport.width)) << 3) ^
-                          u64(std::bit_cast<u32>(viewport.height));
+            const u64 k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
+                          (u64(std::bit_cast<u32>(viewport.width)) << 12) ^
+                          (u64(std::bit_cast<u32>(viewport.height)) << 6) ^
+                          (u64(static_cast<u32>(regs.primitive_type)) << 3) ^
+                          (regs.IsClipDisabled() ? 2u : 0u) ^ (presents_upscaled ? 1u : 0u);
             if (logged_vp.insert(k).second) {
                 LOG_INFO(Render_Vulkan,
                          "Final viewport: cb0={:#x}, prim={}, clipDisabled={}, vp=({},{} "
