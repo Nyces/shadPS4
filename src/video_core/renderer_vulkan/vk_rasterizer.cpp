@@ -1807,6 +1807,24 @@ void Rasterizer::UpdateViewportScissorState() const {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
                 }
+                // Report the raw register state of every distinct enlarged-target
+                // clip-enabled pass so the viewport values handed to Vulkan can be
+                // traced back to what the game actually wrote. The per-axis rule
+                // keys on screen_scissor and rt_fit, and a viewport that exceeds
+                // its own target is the signature of an over-applied scale.
+                static std::unordered_set<u64> logged_rtvp;
+                const u64 rtvp_k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 28) ^
+                                   (u64(std::bit_cast<u32>(vp.xscale)) << 14) ^
+                                   u64(std::bit_cast<u32>(vp.yscale));
+                if (logged_rtvp.insert(rtvp_k).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "RT viewport raw: cb0={:#x}, rawVP=({},{},{},{}), "
+                             "scissor=({},{}) {}x{}, rtFit={}x{}, convertedXY={}{}",
+                             liverpool->regs.color_buffers[0].Address(), vp.xoffset, vp.yoffset,
+                             vp.xscale, vp.yscale, regs.screen_scissor.top_left_x,
+                             regs.screen_scissor.top_left_y, scsr_w, scsr_h, rt_fit_x, rt_fit_y,
+                             converted_x, converted_y);
+                }
             }
         }
 
