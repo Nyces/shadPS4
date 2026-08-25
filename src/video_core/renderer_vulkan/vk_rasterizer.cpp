@@ -395,20 +395,29 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             }
             // Report every pass targeting the output surface, including the ones that
             // need no adjusting, so the whole composition can be reconstructed.
+            // The shader hashes are part of the key and the output: passes with an
+            // identical register signature but a different vertex layout need opposite
+            // viewport treatment, and the only way to tell them apart is to map each
+            // shader pair onto the registers it arrives with, then join that table
+            // with the post-VS geometry classification from a RenderDoc capture.
             static std::unordered_set<u64> logged;
+            const u64 vs_hash = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)];
+            const u64 fs_hash = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)];
             const u64 log_key = (u64(scsr_w) << 32) | (u64(scsr_h) << 16) |
                                 (u64(static_cast<u32>(regs.primitive_type)) << 4) |
                                 (regs.IsClipDisabled() ? 2u : 0u) |
                                 (regs.viewport_control.xscale_enable ? 1u : 0u);
-            if (logged.insert(log_key).second) {
+            const u64 log_id = log_key ^ (vs_hash * 0x9E3779B97F4A7C15ull >> 6) ^ (fs_hash >> 17);
+            if (logged.insert(log_id).second) {
                 LOG_INFO(Render_Vulkan,
                          "VideoOut pass: surface {}x{}, prim={}, clipDisabled={}, vte=({},{}), "
-                         "vp=({},{},{},{}), screenScissor={}x{}, mrt={:#x}, opened={}, fit={}x{}",
+                         "vp=({},{},{},{}), screenScissor={}x{}, mrt={:#x}, opened={}, fit={}x{}, "
+                         "vsHash={:#x}, fsHash={:#x}",
                          vo->width, vo->height, static_cast<u32>(regs.primitive_type),
                          regs.IsClipDisabled(), regs.viewport_control.xscale_enable,
                          regs.viewport_control.yscale_enable, vp.xoffset, vp.yoffset, vp.xscale,
                          vp.yscale, scsr_w, scsr_h, key.mrt_mask, output_upscaled, vo_fit_x,
-                         vo_fit_y);
+                         vo_fit_y, vs_hash, fs_hash);
             }
         }
     }
