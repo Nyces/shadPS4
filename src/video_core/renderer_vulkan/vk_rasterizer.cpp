@@ -395,11 +395,16 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             }
             // Report every pass targeting the output surface, including the ones that
             // need no adjusting, so the whole composition can be reconstructed.
-            // The shader hashes are part of the key and the output: passes with an
-            // identical register signature but a different vertex layout need opposite
-            // viewport treatment, and the only way to tell them apart is to map each
-            // shader pair onto the registers it arrives with, then join that table
-            // with the post-VS geometry classification from a RenderDoc capture.
+            // The shader hashes AND the viewport registers are part of the key: the
+            // resolution patch rewrites only some of the constants the game derives its
+            // viewport registers and vertex conversion bases from, so one shader can
+            // arrive with 1080p registers in one batch and 4K registers in another
+            // (verified in a capture: the same sprite vertex shader appears with a
+            // 1920-wide viewport in one draw and a 3840-wide one in the next). The
+            // geometry basis of each shader family (1920, 3840 or 7680) decides the
+            // viewport it needs, and that basis can only be mapped by logging every
+            // shader-plus-register combination and joining it with the post-VS
+            // geometry classification from a RenderDoc capture.
             static std::unordered_set<u64> logged;
             const u64 vs_hash = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)];
             const u64 fs_hash = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)];
@@ -407,7 +412,9 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                                 (u64(static_cast<u32>(regs.primitive_type)) << 4) |
                                 (regs.IsClipDisabled() ? 2u : 0u) |
                                 (regs.viewport_control.xscale_enable ? 1u : 0u);
-            const u64 log_id = log_key ^ (vs_hash * 0x9E3779B97F4A7C15ull >> 6) ^ (fs_hash >> 17);
+            const u64 log_id = log_key ^ (vs_hash * 0x9E3779B97F4A7C15ull >> 6) ^ (fs_hash >> 17) ^
+                               (u64(std::bit_cast<u32>(vp.xoffset)) << 20) ^
+                               (u64(std::bit_cast<u32>(vp.xscale)) >> 3);
             if (logged.insert(log_id).second) {
                 LOG_INFO(Render_Vulkan,
                          "VideoOut pass: surface {}x{}, prim={}, clipDisabled={}, vte=({},{}), "
