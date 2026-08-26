@@ -210,6 +210,14 @@ private:
     // though the positions were already scaled to the surface), so their viewport is
     // pinned to the guest window instead of the surface or a stretched variant.
     std::unordered_set<u64> window_space_vs_hashes{};
+    // Hash of the previous clip-enabled VideoOut pass and how many times it drew in a
+    // row. Sprite batches (crowd, glowsticks, note effects) submit the same vertex
+    // shader hundreds of times per frame, while the interface elements each draw a
+    // handful of times, so a long run of one hash identifies a window-space sprite
+    // shader without needing the dual-signature observation, which only completes
+    // when both scenes using the shader are visited in the same session.
+    u64 last_vo_vs_hash{};
+    u32 vo_burst_count{};
 };
 
 } // namespace Vulkan

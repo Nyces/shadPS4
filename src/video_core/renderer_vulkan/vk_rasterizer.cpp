@@ -424,6 +424,29 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                              current_vs_hash);
                 }
             }
+            // Burst classification. The dual-signature record above only completes
+            // when both scenes using the shader are visited in one session; a tester
+            // replaying a single problem scene never triggers it. Sprite batches
+            // have a second fingerprint: the game submits the same vertex shader
+            // back to back hundreds of times per frame (crowd, glowsticks, note
+            // circles), while every interface element draws a handful of times with
+            // its own shader. A long run of one hash therefore identifies a sprite
+            // batch on its own, whichever registers it arrives with.
+            if (!regs.IsClipDisabled() && vo->width > guest_window_width) {
+                if (current_vs_hash == last_vo_vs_hash) {
+                    ++vo_burst_count;
+                } else {
+                    last_vo_vs_hash = current_vs_hash;
+                    vo_burst_count = 1;
+                }
+                constexpr u32 kSpriteBurstDraws = 50;
+                if (vo_burst_count == kSpriteBurstDraws &&
+                    window_space_vs_hashes.insert(current_vs_hash).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "Window-space sprite shader detected by burst: vsHash={:#x}",
+                             current_vs_hash);
+                }
+            }
             // Report every pass targeting the output surface, including the ones that
             // need no adjusting, so the whole composition can be reconstructed.
             // The shader hashes AND the viewport registers are part of the key: the
@@ -1808,10 +1831,10 @@ void Rasterizer::UpdateViewportScissorState() const {
             // alongside the output surface, and applying both magnified the geometry to
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
-            if (vo_pass && !window_space_vs_hashes.empty() &&
-                window_space_vs_hashes.contains(current_vs_hash) && guest_window_width > 0) {
+            if (vo_pass && !draws_into_enlarged_target && guest_window_width > 0 &&
+                window_space_vs_hashes.contains(current_vs_hash)) {
                 // The sprite shaders the resolution patch left inconsistent (see the
-                // dual-signature detection in PrepareRenderState). Their matrices scale
+                // classification in PrepareRenderState). Their matrices scale
                 // window pixels by the window half-size even though the positions were
                 // already enlarged to the surface, so the NDC they produce is twice too
                 // large and the geometry leaves the screen entirely. Pin the viewport to
@@ -1822,6 +1845,18 @@ void Rasterizer::UpdateViewportScissorState() const {
                 viewport.y = float(guest_window_height);
                 viewport.width = float(guest_window_width);
                 viewport.height = -float(guest_window_height);
+                // Count the draws taking the rule so the log unambiguously shows
+                // whether the gameplay sprite batches reached it, and how much
+                // traffic did.
+                static std::unordered_map<u64, u32> pinned_draw_counts;
+                const u32 pinned_n = ++pinned_draw_counts[current_vs_hash];
+                if (pinned_n == 1 || pinned_n % 1000 == 0) {
+                    LOG_INFO(Render_Vulkan,
+                             "Window-space viewport pinned: vsHash={:#x}, draws={}, "
+                             "rawVP=({},{},{},{})",
+                             current_vs_hash, pinned_n, vp.xoffset, vp.yoffset, vp.xscale,
+                             vp.yscale);
+                }
             } else if (output_upscaled && !draws_into_enlarged_target) {
                 // The geometry of this pass is still laid out for the game's original
                 // window, so it only reaches a fraction of the enlarged surface. Stretch
