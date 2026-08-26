@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <unordered_map>
 #include <unordered_set>
 
 #include "common/recursive_lock.h"
@@ -194,6 +195,21 @@ private:
     // presentation scale. Its contents are already at the full size, so it must not
     // receive the window-to-surface ratio the other output passes need.
     mutable bool presents_upscaled{};
+    // Vertex shader hash of the current draw, for the per-shader viewport rule below.
+    mutable u64 current_vs_hash{};
+    // Viewport register signatures observed per vertex shader on the output surface:
+    // bit 1 marks window-sized registers, bit 2 surface-sized ones. The resolution
+    // patch rewrites only some of the constants the game derives its registers and
+    // vertex conversion bases from, so a shader whose geometry is laid out for the
+    // original window can arrive with window-sized registers in one batch and
+    // surface-sized registers in another. That dual signature is the fingerprint of
+    // such a shader: a consistent one would never need both.
+    std::unordered_map<u64, u8> vs_viewport_signatures{};
+    // Vertex shaders confirmed to carry the dual signature. Their geometry is built on
+    // the window basis (the matrices divide window pixels by the window half-size even
+    // though the positions were already scaled to the surface), so their viewport is
+    // pinned to the guest window instead of the surface or a stretched variant.
+    std::unordered_set<u64> window_space_vs_hashes{};
 };
 
 } // namespace Vulkan
