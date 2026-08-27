@@ -194,16 +194,6 @@ private:
     // presentation scale. Its contents are already at the full size, so it must not
     // receive the window-to-surface ratio the other output passes need.
     mutable bool presents_upscaled{};
-    // Vertex shader hash of the current draw, for the per-shader sprite rule below.
-    mutable u64 current_vs_hash{};
-    // Vertex shaders that read a buffer (SSBO) while drawing into the output surface.
-    // The resolution patch enlarges the pixel positions those shaders submit, but their
-    // instance matrices still divide by the 1080p window half-size, so the NDC they
-    // produce is twice too large and the geometry leaves the screen entirely. Pinning
-    // the viewport to the guest window maps the NDC range back onto the window-sized
-    // region of the surface the positions actually describe. The shaders that only use
-    // push constants (interface and composition blits) never enter this set.
-    std::unordered_set<u64> window_space_vs_hashes{};
 };
 
 } // namespace Vulkan

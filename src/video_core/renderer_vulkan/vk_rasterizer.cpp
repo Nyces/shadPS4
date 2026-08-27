@@ -393,24 +393,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 vo_fit_y = vo_known_fit_y;
                 output_upscaled = true;
             }
-            // Sprite classification. A clip-enabled pass drawing into the output
-            // surface whose vertex shader reads a buffer gets its instance transform
-            // from that buffer (a 4x4 matrix). The resolution patch doubles the pixel
-            // positions the game submits, but the matrix still divides by the 1080p
-            // window half-size, so the NDC the shader produces is twice too large and
-            // the geometry leaves the screen. The interface and the composition blits
-            // only use push constants, so a buffer-binding vertex shader identifies a
-            // sprite batch reliably, independent of the register values it arrives
-            // with in any given scene.
-            current_vs_hash = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)];
-            if (!regs.IsClipDisabled()) {
-                const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
-                if (!vs_info.buffers.empty() &&
-                    window_space_vs_hashes.insert(current_vs_hash).second) {
-                    LOG_INFO(Render_Vulkan, "Window-space sprite shader detected: vsHash={:#x}",
-                             current_vs_hash);
-                }
-            }
             // Report every pass targeting the output surface, including the ones that
             // need no adjusting, so the whole composition can be reconstructed.
             // The shader hashes AND the viewport registers are part of the key: the
@@ -1795,29 +1777,7 @@ void Rasterizer::UpdateViewportScissorState() const {
             // alongside the output surface, and applying both magnified the geometry to
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
-            // Sprite shaders that read a buffer (SSBO) get their instance transform
-            // from a 4x4 matrix that divides by the 1080p window half-size. The
-            // resolution patch doubles the pixel positions, but the matrix stays at
-            // the old half-size, so the NDC ends up twice too large and the geometry
-            // leaves the screen. Pin the viewport to the guest window so the NDC maps
-            // back onto the window-sized region of the surface the positions describe.
-            if (vo_pass && !draws_into_enlarged_target && guest_window_width > 0 &&
-                window_space_vs_hashes.contains(current_vs_hash)) {
-                viewport.x = 0.0f;
-                viewport.y = float(guest_window_height);
-                viewport.width = float(guest_window_width);
-                viewport.height = -float(guest_window_height);
-                static std::unordered_map<u64, u32> pinned_draw_counts;
-                const u32 pinned_n = ++pinned_draw_counts[current_vs_hash];
-                if (pinned_n == 1 || pinned_n % 1000 == 0) {
-                    LOG_INFO(Render_Vulkan,
-                             "Window-space viewport pinned: vsHash={:#x}, draws={}, "
-                             "rawVP=({},{},{},{})",
-                             current_vs_hash, pinned_n, regs.viewports[0].xoffset,
-                             regs.viewports[0].yoffset, regs.viewports[0].xscale,
-                             regs.viewports[0].yscale);
-                }
-            } else if (output_upscaled && !draws_into_enlarged_target) {
+            if (output_upscaled && !draws_into_enlarged_target) {
                 // The geometry of this pass is still laid out for the game's original
                 // window, so it only reaches a fraction of the enlarged surface. Stretch
                 // the viewport by the same ratio to spread it over the whole surface.
