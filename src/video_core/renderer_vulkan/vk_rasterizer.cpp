@@ -1778,20 +1778,29 @@ void Rasterizer::UpdateViewportScissorState() const {
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
             if (output_upscaled && !draws_into_enlarged_target) {
-                // The geometry of this pass is still laid out for the game's original
-                // window, so it only reaches a fraction of the enlarged surface. Stretch
-                // the viewport by the same ratio to spread it over the whole surface.
-                //
-                // The viewport registers cannot tell which passes need this: the UI and
-                // the scene both arrive with a viewport already spanning the surface, yet
-                // the UI vertices only span the original window and do need the stretch.
-                // Gating this on the viewport extent was tried and shrank the interface
-                // to a quarter of the frame, the same regression the scissor-based gate
-                // produced, so every pass targeting the surface takes the ratio.
-                viewport.x *= vo_fit_x;
-                viewport.y *= vo_fit_y;
-                viewport.width *= vo_fit_x;
-                viewport.height *= vo_fit_y;
+                // Stretch only the axes that fall short of the surface. A clip-enabled
+                // pass maps NDC through its viewport, so one whose viewport already
+                // spans the surface fills it exactly; stretching that viewport magnifies
+                // the content past the surface. The 4K patch converts the game's
+                // viewport registers and its UI projection basis together, so passes
+                // that arrive with registers already spanning the surface (the capture
+                // shows 4K xoffset/xscale viewports) must not also receive the
+                // window-to-surface ratio, or every element lands at double its intended
+                // position (the 7680x4320 viewports seen in the rdc). Passes that still
+                // carry the original 1080p registers get the ratio on the failing axis.
+                const bool covers_x =
+                    vo_surface_width > 0 && viewport.width >= float(vo_surface_width) * 0.999f;
+                const bool covers_y =
+                    vo_surface_height > 0 &&
+                    std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
+                if (!covers_x) {
+                    viewport.x *= vo_fit_x;
+                    viewport.width *= vo_fit_x;
+                }
+                if (!covers_y) {
+                    viewport.y *= vo_fit_y;
+                    viewport.height *= vo_fit_y;
+                }
             } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
