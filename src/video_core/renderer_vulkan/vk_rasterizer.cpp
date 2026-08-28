@@ -145,6 +145,7 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
 static bool OutputSpriteNeedsStretch(u64 vs_pgm_hash) {
     switch (vs_pgm_hash) {
     case 0x00000000788fc913ULL: // 2D UI sprite quad (alpha discard, vertex color)
+    case 0x000000000ec3717aULL: // UI layer quad: draws the 1080p UI sheet and widget textures
         return true;
     default:
         return false;
