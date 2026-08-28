@@ -134,18 +134,20 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
 // Two geometry bases coexist under the 4K patch:
 //  - passes whose viewport registers were NOT converted (their raw viewport width is
 //    half of the surface) lay everything out for the original 1080p window and always
-//    need the doubling. This is where the fonts, the gameplay notes/stars and every
-//    other batch the patch missed live, and no shader hash can decide them because the
-//    same vertex shader also runs in converted batches: the raw viewport width does.
+//    need the doubling. This is where the gameplay notes/stars and every other batch
+//    the patch missed live, and no shader hash can decide them because the same vertex
+//    shader also runs in converted batches: the raw viewport width does.
 //  - converted passes (raw viewport width equals the surface) span either the full NDC
 //    (the matrix-driven and procedural passes, which keep the 4K viewport) or half of
-//    it (the 1080p UI sprite binaries listed below, which need the doubled viewport).
+//    it (the 1080p UI-sheet binaries listed below, which need the doubled viewport).
+// The glyph/font batches are NOT in the list: the patch converts their uScale transform
+// too, so their quads already span the full NDC at the 4K viewport and stretching them
+// misplaces every character text.
 static bool OutputSpriteNeedsStretch(u64 vs_pgm_hash, float raw_vp_width, u32 surface_width) {
     if (raw_vp_width > 0.f && raw_vp_width < float(surface_width) * 0.75f) {
         return true; // unconverted viewport: geometry still laid out for the 1080p window
     }
     switch (vs_pgm_hash) {
-    case 0x00000000788fc913ULL: // 2D UI sprite quad (alpha discard, vertex color)
     case 0x000000000ec3717aULL: // UI layer quad: draws the 1080p UI sheet and widget textures
         return true;
     default:
