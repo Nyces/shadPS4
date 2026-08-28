@@ -130,21 +130,17 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
     return false;
 }
 
-// Returns whether the vertex shader reads user-data registers. The game's 2D sprite
-// shaders transform each vertex with a push-constant uScale/uTranslate pair and read no
-// user data, while the 3D scene, the effect shaders and the composition fetch their
-// instance/vertex matrices and buffer addresses from user-data registers. Under the
-// resolution patch the two families end up needing different output viewports: the
-// sprite geometry is still laid out for the game's original window (half-size NDC) and
-// has to be stretched to the whole surface, while the matrix-driven geometry already
-// spans it and must not be touched. The user-data mask is set at shader-compile time,
-// so unlike the runtime binding list it cannot be confused by a sprite that also binds
-// a texture or a small uniform buffer. Only the vertex stage is consulted: a fragment
-// shader sampling a texture may read user data for its image descriptor without the
-// vertex geometry taking part in the matrix family.
-static bool VertexReadsUserData(const GraphicsPipeline* pipeline) {
-    const auto& vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
-    return vs.ud_mask.NumRegs() > 0;
+// Returns whether the pass clips to the whole output surface. The game keeps the
+// window rectangle it clips to in the screen-scissor register, and the resolution
+// patch does not rewrite it: passes whose geometry is still laid out for the original
+// 1080p window keep a 1920x1080 scissor, while the matrix-driven passes (the 3D scene,
+// the effect quads, the composition and the rhythm elements) clip to the full 4K
+// surface. The scissor is therefore the only register that still carries the geometry
+// basis of each output-surface pass, and it gates the stretch below.
+static bool ScissorCoversSurface(const AmdGpu::Regs& regs, u32 surface_width, u32 surface_height) {
+    const u32 scsr_w = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x);
+    const u32 scsr_h = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y);
+    return scsr_w >= surface_width && scsr_h >= surface_height;
 }
 
 // Returns whether any stage samples one of the offscreen targets that are rendered at
@@ -1691,7 +1687,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
-    UpdateViewportScissorState(pipeline);
+    UpdateViewportScissorState();
     UpdateDepthStencilState();
     UpdatePrimitiveState(is_indexed);
     UpdateRasterizationState();
@@ -1701,7 +1697,7 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
     dynamic_state.Commit(instance, scheduler.CommandBuffer());
 }
 
-void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) const {
+void Rasterizer::UpdateViewportScissorState() const {
     const auto& regs = liverpool->regs;
 
     const auto combined_scissor_value_tl = [](s16 scr, s16 win, s16 gen, s16 win_offset) {
@@ -1801,33 +1797,33 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 // needing one ratio to reach the 4K surface) or 4K registers (viewport
                 // 3840 wide, needing another because their vertices only span half the
                 // NDC), they have to be stretched to fill the surface. The matrix-driven
-                // shaders - the 3D scene, the effect quads and the composition - span the
-                // full NDC already, so their viewport must stay at the 4K size it was
-                // written with; stretching it magnifies their geometry past the surface.
-                // The user-data mask set at shader-compile time tells the two families
-                // apart: the sprite shaders read no user-data registers (only the 16-byte
-                // uScale/uTranslate push constant), while the matrix shaders fetch their
-                // buffer handles and matrix addresses from user-data registers.
-                const bool is_sprite = !VertexReadsUserData(pipeline);
-                if (is_sprite) {
+                // shaders - the 3D scene, the effect quads, the composition and the
+                // rhythm elements - span the full NDC already, so their viewport must
+                // stay at the 4K size it was written with; stretching it magnifies their
+                // geometry past the surface. The scissor the game writes tells the two
+                // families apart: it still clips to the original 1080p window for the
+                // sprite geometry, and to the full 4K surface for the matrix geometry.
+                const bool covers_surface =
+                    ScissorCoversSurface(regs, vo_surface_width, vo_surface_height);
+                if (!covers_surface) {
                     viewport.x *= vo_fit_x;
                     viewport.y *= vo_fit_y;
                     viewport.width *= vo_fit_x;
                     viewport.height *= vo_fit_y;
                 }
-                // Report every distinct output-surface pass with the family the
-                // user-data mask assigned it, so the sprite stretch can be traced to
-                // the batches it actually touched.
+                // Report every distinct output-surface pass with the family the scissor
+                // assigned it, so the sprite stretch can be traced to the batches it
+                // actually touched.
                 static std::unordered_set<u64> logged_sprite;
                 const u64 sprite_k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
                                      (u64(std::bit_cast<u32>(viewport.width)) << 14) ^
                                      (u64(std::bit_cast<u32>(viewport.height)) << 2) ^
-                                     (is_sprite ? 1u : 0u);
+                                     (covers_surface ? 1u : 0u);
                 if (logged_sprite.insert(sprite_k).second) {
                     LOG_INFO(Render_Vulkan,
-                             "Output-surface sprite classification: cb0={:#x}, sprite={}, "
+                             "Output-surface sprite classification: cb0={:#x}, coversSurface={}, "
                              "stretchedVP=({},{} {}x{}), voFit={}x{}",
-                             liverpool->regs.color_buffers[0].Address(), is_sprite, viewport.x,
+                             liverpool->regs.color_buffers[0].Address(), covers_surface, viewport.x,
                              viewport.y, viewport.width, viewport.height, vo_fit_x, vo_fit_y);
                 }
             } else if (draws_into_enlarged_target) {
