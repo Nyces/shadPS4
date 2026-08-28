@@ -130,25 +130,21 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
     return false;
 }
 
-// Returns whether any stage of the pipeline binds a storage buffer. The game's 2D
-// sprite shaders transform each vertex with a push-constant uScale/uTranslate pair and
-// bind no buffers at all, while the 3D scene, the effect shaders and the composition
-// read instance/vertex matrices from SSBOs. Under the resolution patch the two families
-// end up needing different output viewports: the sprite geometry is still laid out for
-// the game's original window (half-size NDC) and has to be stretched to the whole
-// surface, while the matrix-driven geometry already spans it and must not be touched.
-// The binding list is the only signal that tells them apart, so it gates the output
-// stretch below.
-static bool BindsStorageBuffer(const GraphicsPipeline* pipeline) {
-    for (const auto* stage : pipeline->GetStages()) {
-        if (!stage) {
-            continue;
-        }
-        if (!stage->buffers.empty()) {
-            return true;
-        }
-    }
-    return false;
+// Returns whether the vertex shader reads user-data registers. The game's 2D sprite
+// shaders transform each vertex with a push-constant uScale/uTranslate pair and read no
+// user data, while the 3D scene, the effect shaders and the composition fetch their
+// instance/vertex matrices and buffer addresses from user-data registers. Under the
+// resolution patch the two families end up needing different output viewports: the
+// sprite geometry is still laid out for the game's original window (half-size NDC) and
+// has to be stretched to the whole surface, while the matrix-driven geometry already
+// spans it and must not be touched. The user-data mask is set at shader-compile time,
+// so unlike the runtime binding list it cannot be confused by a sprite that also binds
+// a texture or a small uniform buffer. Only the vertex stage is consulted: a fragment
+// shader sampling a texture may read user data for its image descriptor without the
+// vertex geometry taking part in the matrix family.
+static bool VertexReadsUserData(const GraphicsPipeline* pipeline) {
+    const auto& vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
+    return vs.ud_mask.NumRegs() > 0;
 }
 
 // Returns whether any stage samples one of the offscreen targets that are rendered at
@@ -1808,22 +1804,20 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 // shaders - the 3D scene, the effect quads and the composition - span the
                 // full NDC already, so their viewport must stay at the 4K size it was
                 // written with; stretching it magnifies their geometry past the surface.
-                // The binding list separates the two families: the sprite shaders bind
-                // no storage buffer and are stretched unconditionally, the rest are left
-                // alone. Gating on the viewport extent instead cannot work, because both
-                // families share the 4K register set on the output surface and differ
-                // only in how much of the NDC their geometry covers.
-                const bool is_sprite = !BindsStorageBuffer(pipeline);
+                // The user-data mask set at shader-compile time tells the two families
+                // apart: the sprite shaders read no user-data registers (only the 16-byte
+                // uScale/uTranslate push constant), while the matrix shaders fetch their
+                // buffer handles and matrix addresses from user-data registers.
+                const bool is_sprite = !VertexReadsUserData(pipeline);
                 if (is_sprite) {
                     viewport.x *= vo_fit_x;
                     viewport.y *= vo_fit_y;
                     viewport.width *= vo_fit_x;
                     viewport.height *= vo_fit_y;
                 }
-                // Report every distinct output-surface pass with the family the binding
-                // list assigned it, so the sprite stretch can be traced to the batches it
-                // actually touched. The key includes the viewport it would reach with and
-                // without the stretch.
+                // Report every distinct output-surface pass with the family the
+                // user-data mask assigned it, so the sprite stretch can be traced to
+                // the batches it actually touched.
                 static std::unordered_set<u64> logged_sprite;
                 const u64 sprite_k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
                                      (u64(std::bit_cast<u32>(viewport.width)) << 14) ^
