@@ -130,19 +130,20 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
     return false;
 }
 
-// Returns whether the vertex shader of an output-surface pass lays its geometry out
-// for the original 1080p window, i.e. spans only half of the NDC. Under the 4K
-// resolution patch the viewport AND scissor registers of every output pass were
-// converted to 4K already, so the registers can no longer tell the two geometry
-// families apart - the shader binaries are the only thing that carries the basis.
-// Whether a pass needs the doubled viewport is therefore decided per vertex shader:
-// the 2D UI sprite quads (textured, alpha-tested, positioned by the uScale/uTranslate
-// buffer reads) are authored in 1080p window coordinates and have to be stretched to
-// the 7680 viewport, while the matrix-driven passes (3D scene, composition) and the
-// procedural rhythm-stage circles already span the full NDC and must keep the 4K
-// viewport. The hashes are the compiled-program hashes the shader dumps are named by
-// (logs report them as the pgm hash of the vertex stage).
-static bool OutputSpriteNeedsStretch(u64 vs_pgm_hash) {
+// Returns whether the pass must stretch its viewport to fill the output surface.
+// Two geometry bases coexist under the 4K patch:
+//  - passes whose viewport registers were NOT converted (their raw viewport width is
+//    half of the surface) lay everything out for the original 1080p window and always
+//    need the doubling. This is where the fonts, the gameplay notes/stars and every
+//    other batch the patch missed live, and no shader hash can decide them because the
+//    same vertex shader also runs in converted batches: the raw viewport width does.
+//  - converted passes (raw viewport width equals the surface) span either the full NDC
+//    (the matrix-driven and procedural passes, which keep the 4K viewport) or half of
+//    it (the 1080p UI sprite binaries listed below, which need the doubled viewport).
+static bool OutputSpriteNeedsStretch(u64 vs_pgm_hash, float raw_vp_width, u32 surface_width) {
+    if (raw_vp_width > 0.f && raw_vp_width < float(surface_width) * 0.75f) {
+        return true; // unconverted viewport: geometry still laid out for the 1080p window
+    }
     switch (vs_pgm_hash) {
     case 0x00000000788fc913ULL: // 2D UI sprite quad (alpha discard, vertex color)
     case 0x000000000ec3717aULL: // UI layer quad: draws the 1080p UI sheet and widget textures
@@ -1800,20 +1801,19 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
             if (output_upscaled && !draws_into_enlarged_target) {
-                // The patch does not convert the game's passes as a whole. Under it the
-                // viewport AND scissor registers of every output pass arrive converted to
-                // 4K, so the registers cannot separate the two geometry families anymore.
-                // The 2D UI sprite shaders still lay their quads out for the original
-                // 1080p window (their vertices span half the NDC), so they have to be
-                // stretched to fill the surface. The matrix-driven shaders (the 3D
-                // scene, the effect quads, the composition) and the procedural rhythm
-                // circles span the full NDC already, so their viewport must stay at the
-                // 4K size it was written with; stretching it magnifies their geometry
-                // past the surface. The only signal left is the vertex shader itself,
-                // so the 1080p sprite binaries are listed explicitly in
-                // OutputSpriteNeedsStretch.
+                // The patch does not convert the game's passes as a whole. Passes the
+                // patch missed still carry 1080p viewport registers (their raw width is
+                // half of the surface): fonts, gameplay notes and stars live there, and
+                // they all need the doubling. Passes it did convert (raw width equals
+                // the surface) separate into the ones spanning the full NDC - the 3D
+                // scene, the composition and the procedural rhythm circles, which keep
+                // the 4K viewport - and the 1080p UI sprite families, whose quads span
+                // half the NDC and need the doubled viewport. See
+                // OutputSpriteNeedsStretch for both rules.
                 const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
-                const bool stretch = OutputSpriteNeedsStretch(vs_info.pgm_hash);
+                const float raw_vp_width = viewport.width;
+                const bool stretch =
+                    OutputSpriteNeedsStretch(vs_info.pgm_hash, raw_vp_width, vo_surface_width);
                 if (stretch) {
                     viewport.x *= vo_fit_x;
                     viewport.y *= vo_fit_y;
@@ -1828,14 +1828,15 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 const u64 sprite_k =
                     (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
                     (vs_info.pgm_hash << 12) ^ (u64(std::bit_cast<u32>(viewport.width)) << 14) ^
-                    (u64(std::bit_cast<u32>(viewport.height)) << 2) ^ (stretch ? 1u : 0u);
+                    (u64(std::bit_cast<u32>(viewport.height)) << 2) ^
+                    (u64(std::bit_cast<u32>(raw_vp_width)) << 4) ^ (stretch ? 1u : 0u);
                 if (logged_sprite.insert(sprite_k).second) {
                     LOG_INFO(Render_Vulkan,
                              "Output-surface sprite classification: cb0={:#x}, spriteVS={:#x}, "
-                             "stretch={}, stretchedVP=({},{} {}x{}), voFit={}x{}",
-                             liverpool->regs.color_buffers[0].Address(), vs_info.pgm_hash, stretch,
-                             viewport.x, viewport.y, viewport.width, viewport.height, vo_fit_x,
-                             vo_fit_y);
+                             "rawVPW={}, stretch={}, stretchedVP=({},{} {}x{}), voFit={}x{}",
+                             liverpool->regs.color_buffers[0].Address(), vs_info.pgm_hash,
+                             raw_vp_width, stretch, viewport.x, viewport.y, viewport.width,
+                             viewport.height, vo_fit_x, vo_fit_y);
                 }
             } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
