@@ -130,17 +130,25 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
     return false;
 }
 
-// Returns whether the pass clips to the whole output surface. The game keeps the
-// window rectangle it clips to in the screen-scissor register, and the resolution
-// patch does not rewrite it: passes whose geometry is still laid out for the original
-// 1080p window keep a 1920x1080 scissor, while the matrix-driven passes (the 3D scene,
-// the effect quads, the composition and the rhythm elements) clip to the full 4K
-// surface. The scissor is therefore the only register that still carries the geometry
-// basis of each output-surface pass, and it gates the stretch below.
-static bool ScissorCoversSurface(const AmdGpu::Regs& regs, u32 surface_width, u32 surface_height) {
-    const u32 scsr_w = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x);
-    const u32 scsr_h = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y);
-    return scsr_w >= surface_width && scsr_h >= surface_height;
+// Returns whether the vertex shader of an output-surface pass lays its geometry out
+// for the original 1080p window, i.e. spans only half of the NDC. Under the 4K
+// resolution patch the viewport AND scissor registers of every output pass were
+// converted to 4K already, so the registers can no longer tell the two geometry
+// families apart - the shader binaries are the only thing that carries the basis.
+// Whether a pass needs the doubled viewport is therefore decided per vertex shader:
+// the 2D UI sprite quads (textured, alpha-tested, positioned by the uScale/uTranslate
+// buffer reads) are authored in 1080p window coordinates and have to be stretched to
+// the 7680 viewport, while the matrix-driven passes (3D scene, composition) and the
+// procedural rhythm-stage circles already span the full NDC and must keep the 4K
+// viewport. The hashes are the compiled-program hashes the shader dumps are named by
+// (logs report them as the pgm hash of the vertex stage).
+static bool OutputSpriteNeedsStretch(u64 vs_pgm_hash) {
+    switch (vs_pgm_hash) {
+    case 0x00000000788fc913ULL: // 2D UI sprite quad (alpha discard, vertex color)
+        return true;
+    default:
+        return false;
+    }
 }
 
 // Returns whether any stage samples one of the offscreen targets that are rendered at
@@ -1687,7 +1695,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
-    UpdateViewportScissorState();
+    UpdateViewportScissorState(pipeline);
     UpdateDepthStencilState();
     UpdatePrimitiveState(is_indexed);
     UpdateRasterizationState();
@@ -1697,7 +1705,7 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
     dynamic_state.Commit(instance, scheduler.CommandBuffer());
 }
 
-void Rasterizer::UpdateViewportScissorState() const {
+void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) const {
     const auto& regs = liverpool->regs;
 
     const auto combined_scissor_value_tl = [](s16 scr, s16 win, s16 gen, s16 win_offset) {
@@ -1791,40 +1799,42 @@ void Rasterizer::UpdateViewportScissorState() const {
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
             if (output_upscaled && !draws_into_enlarged_target) {
-                // The patch does not convert the game's passes as a whole. The sprite
-                // shaders still lay their geometry out for the original window: whether
-                // they arrive with 1080p viewport registers (Vulkan viewport 1920 wide,
-                // needing one ratio to reach the 4K surface) or 4K registers (viewport
-                // 3840 wide, needing another because their vertices only span half the
-                // NDC), they have to be stretched to fill the surface. The matrix-driven
-                // shaders - the 3D scene, the effect quads, the composition and the
-                // rhythm elements - span the full NDC already, so their viewport must
-                // stay at the 4K size it was written with; stretching it magnifies their
-                // geometry past the surface. The scissor the game writes tells the two
-                // families apart: it still clips to the original 1080p window for the
-                // sprite geometry, and to the full 4K surface for the matrix geometry.
-                const bool covers_surface =
-                    ScissorCoversSurface(regs, vo_surface_width, vo_surface_height);
-                if (!covers_surface) {
+                // The patch does not convert the game's passes as a whole. Under it the
+                // viewport AND scissor registers of every output pass arrive converted to
+                // 4K, so the registers cannot separate the two geometry families anymore.
+                // The 2D UI sprite shaders still lay their quads out for the original
+                // 1080p window (their vertices span half the NDC), so they have to be
+                // stretched to fill the surface. The matrix-driven shaders (the 3D
+                // scene, the effect quads, the composition) and the procedural rhythm
+                // circles span the full NDC already, so their viewport must stay at the
+                // 4K size it was written with; stretching it magnifies their geometry
+                // past the surface. The only signal left is the vertex shader itself,
+                // so the 1080p sprite binaries are listed explicitly in
+                // OutputSpriteNeedsStretch.
+                const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+                const bool stretch = OutputSpriteNeedsStretch(vs_info.pgm_hash);
+                if (stretch) {
                     viewport.x *= vo_fit_x;
                     viewport.y *= vo_fit_y;
                     viewport.width *= vo_fit_x;
                     viewport.height *= vo_fit_y;
                 }
-                // Report every distinct output-surface pass with the family the scissor
-                // assigned it, so the sprite stretch can be traced to the batches it
-                // actually touched.
+                // Report every distinct output-surface pass with the stretch decision
+                // and the vertex-program hash that decided it, so the sprite list can be
+                // traced back to the batches it touched and extended as new UI shaders
+                // show up.
                 static std::unordered_set<u64> logged_sprite;
-                const u64 sprite_k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
-                                     (u64(std::bit_cast<u32>(viewport.width)) << 14) ^
-                                     (u64(std::bit_cast<u32>(viewport.height)) << 2) ^
-                                     (covers_surface ? 1u : 0u);
+                const u64 sprite_k =
+                    (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
+                    (vs_info.pgm_hash << 12) ^ (u64(std::bit_cast<u32>(viewport.width)) << 14) ^
+                    (u64(std::bit_cast<u32>(viewport.height)) << 2) ^ (stretch ? 1u : 0u);
                 if (logged_sprite.insert(sprite_k).second) {
                     LOG_INFO(Render_Vulkan,
-                             "Output-surface sprite classification: cb0={:#x}, coversSurface={}, "
-                             "stretchedVP=({},{} {}x{}), voFit={}x{}",
-                             liverpool->regs.color_buffers[0].Address(), covers_surface, viewport.x,
-                             viewport.y, viewport.width, viewport.height, vo_fit_x, vo_fit_y);
+                             "Output-surface sprite classification: cb0={:#x}, spriteVS={:#x}, "
+                             "stretch={}, stretchedVP=({},{} {}x{}), voFit={}x{}",
+                             liverpool->regs.color_buffers[0].Address(), vs_info.pgm_hash, stretch,
+                             viewport.x, viewport.y, viewport.width, viewport.height, vo_fit_x,
+                             vo_fit_y);
                 }
             } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
