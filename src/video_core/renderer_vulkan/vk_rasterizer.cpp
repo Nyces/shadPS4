@@ -130,6 +130,27 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
     return false;
 }
 
+// Returns whether any stage of the pipeline binds a storage buffer. The game's 2D
+// sprite shaders transform each vertex with a push-constant uScale/uTranslate pair and
+// bind no buffers at all, while the 3D scene, the effect shaders and the composition
+// read instance/vertex matrices from SSBOs. Under the resolution patch the two families
+// end up needing different output viewports: the sprite geometry is still laid out for
+// the game's original window (half-size NDC) and has to be stretched to the whole
+// surface, while the matrix-driven geometry already spans it and must not be touched.
+// The binding list is the only signal that tells them apart, so it gates the output
+// stretch below.
+static bool BindsStorageBuffer(const GraphicsPipeline* pipeline) {
+    for (const auto* stage : pipeline->GetStages()) {
+        if (!stage) {
+            continue;
+        }
+        if (!stage->buffers.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Returns whether any stage samples one of the offscreen targets that are rendered at
 // the presentation scale. Such a pass is presenting the scene we already rasterized at
 // the full size, so its geometry needs no further stretching, while a pass that reads
@@ -1674,7 +1695,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
-    UpdateViewportScissorState();
+    UpdateViewportScissorState(pipeline);
     UpdateDepthStencilState();
     UpdatePrimitiveState(is_indexed);
     UpdateRasterizationState();
@@ -1684,7 +1705,7 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
     dynamic_state.Commit(instance, scheduler.CommandBuffer());
 }
 
-void Rasterizer::UpdateViewportScissorState() const {
+void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) const {
     const auto& regs = liverpool->regs;
 
     const auto combined_scissor_value_tl = [](s16 scr, s16 win, s16 gen, s16 win_offset) {
@@ -1778,28 +1799,42 @@ void Rasterizer::UpdateViewportScissorState() const {
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
             if (output_upscaled && !draws_into_enlarged_target) {
-                // Stretch only the axes that fall short of the surface. A clip-enabled
-                // pass maps NDC through its viewport, so one whose viewport already
-                // spans the surface fills it exactly; stretching that viewport magnifies
-                // the content past the surface. The 4K patch converts the game's
-                // viewport registers and its UI projection basis together, so passes
-                // that arrive with registers already spanning the surface (the capture
-                // shows 4K xoffset/xscale viewports) must not also receive the
-                // window-to-surface ratio, or every element lands at double its intended
-                // position (the 7680x4320 viewports seen in the rdc). Passes that still
-                // carry the original 1080p registers get the ratio on the failing axis.
-                const bool covers_x =
-                    vo_surface_width > 0 && viewport.width >= float(vo_surface_width) * 0.999f;
-                const bool covers_y =
-                    vo_surface_height > 0 &&
-                    std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
-                if (!covers_x) {
+                // The patch does not convert the game's passes as a whole. The sprite
+                // shaders still lay their geometry out for the original window: whether
+                // they arrive with 1080p viewport registers (Vulkan viewport 1920 wide,
+                // needing one ratio to reach the 4K surface) or 4K registers (viewport
+                // 3840 wide, needing another because their vertices only span half the
+                // NDC), they have to be stretched to fill the surface. The matrix-driven
+                // shaders - the 3D scene, the effect quads and the composition - span the
+                // full NDC already, so their viewport must stay at the 4K size it was
+                // written with; stretching it magnifies their geometry past the surface.
+                // The binding list separates the two families: the sprite shaders bind
+                // no storage buffer and are stretched unconditionally, the rest are left
+                // alone. Gating on the viewport extent instead cannot work, because both
+                // families share the 4K register set on the output surface and differ
+                // only in how much of the NDC their geometry covers.
+                const bool is_sprite = !BindsStorageBuffer(pipeline);
+                if (is_sprite) {
                     viewport.x *= vo_fit_x;
-                    viewport.width *= vo_fit_x;
-                }
-                if (!covers_y) {
                     viewport.y *= vo_fit_y;
+                    viewport.width *= vo_fit_x;
                     viewport.height *= vo_fit_y;
+                }
+                // Report every distinct output-surface pass with the family the binding
+                // list assigned it, so the sprite stretch can be traced to the batches it
+                // actually touched. The key includes the viewport it would reach with and
+                // without the stretch.
+                static std::unordered_set<u64> logged_sprite;
+                const u64 sprite_k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
+                                     (u64(std::bit_cast<u32>(viewport.width)) << 14) ^
+                                     (u64(std::bit_cast<u32>(viewport.height)) << 2) ^
+                                     (is_sprite ? 1u : 0u);
+                if (logged_sprite.insert(sprite_k).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "Output-surface sprite classification: cb0={:#x}, sprite={}, "
+                             "stretchedVP=({},{} {}x{}), voFit={}x{}",
+                             liverpool->regs.color_buffers[0].Address(), is_sprite, viewport.x,
+                             viewport.y, viewport.width, viewport.height, vo_fit_x, vo_fit_y);
                 }
             } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
