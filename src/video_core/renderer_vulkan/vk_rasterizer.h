@@ -96,7 +96,7 @@ private:
     void EliminateFastClear();
 
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
-    void UpdateViewportScissorState(const GraphicsPipeline* pipeline) const;
+    void UpdateViewportScissorState() const;
     void UpdateDepthStencilState() const;
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;
