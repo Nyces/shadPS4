@@ -791,12 +791,16 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                           (u64(std::bit_cast<u32>(push_data.xoffset)) << 2) ^
                           u64(std::bit_cast<u32>(push_data.yscale));
             if (logged_pp.insert(k).second) {
+                const auto* gp = dynamic_cast<const GraphicsPipeline*>(pipeline);
+                const auto& key = gp->GetGraphicsKey();
+                const u64 vs_h = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)];
+                const u64 fs_h = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)];
                 LOG_INFO(Render_Vulkan,
                          "Upscaled RT clip-disabled pass: cb0={:#x}, fit={}x{}, "
-                         "rtFitExtent={}x{}, push=({},{},{},{})",
+                         "rtFitExtent={}x{}, push=({},{},{},{}), vsHash={:#x}, fsHash={:#x}",
                          liverpool->regs.color_buffers[0].Address(), rt_fit_x, rt_fit_y,
                          rt_fit_width, rt_fit_height, push_data.xoffset, push_data.yoffset,
-                         push_data.xscale, push_data.yscale);
+                         push_data.xscale, push_data.yscale, vs_h, fs_h);
             }
         }
     }
