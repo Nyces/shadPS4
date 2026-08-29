@@ -1128,6 +1128,21 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 ApplyPresentationScale(desc);
                 sampling_adjusted = desc.info.size.width != sharp_width;
                 report_sampling = true;
+            } else if (rt_fit_x > 1.001f && guest_window_width > 0 &&
+                       desc.info.size.width == guest_window_width &&
+                       desc.info.size.height == guest_window_height) {
+                // A pass drawing into a target we enlarged samples an intermediate that
+                // the game sized for exactly its window (e.g. the global font/text
+                // layer). It was never a render target, so it is absent from
+                // upscaled_targets and was being looked up at the 1080p size, leaving it
+                // confined to the top-left quadrant of the enlarged output. Treat it as
+                // an upscalable intermediate too: the lookup describes it at the same
+                // presentation scale, so its content spans the whole target.
+                sharp_width = desc.info.size.width;
+                sharp_height = desc.info.size.height;
+                ApplyPresentationScale(desc);
+                sampling_adjusted = desc.info.size.width != sharp_width;
+                report_sampling = true;
             }
 
             image_id = texture_cache.FindImage(desc);
