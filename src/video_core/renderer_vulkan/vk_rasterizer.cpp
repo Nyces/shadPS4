@@ -545,6 +545,25 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     }
     const auto state = BeginRendering(pipeline);
 
+    // Report every unique graphics draw so the whole composition can be
+    // reconstructed, including the passes that read no texture and were therefore
+    // invisible to the texture-side diagnostics.
+    {
+        const auto& key = pipeline->GetGraphicsKey();
+        const u64 vs_h = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Vertex)];
+        const u64 fs_h = key.stage_hashes[static_cast<u32>(Shader::LogicalStage::Fragment)];
+        const u64 cb0 = liverpool->regs.color_buffers[0].Address();
+        const u64 dk = cb0 ^ (vs_h << 20) ^ (fs_h >> 12) ^ (u64(regs.num_indices) << 4) ^
+                       u64(static_cast<u32>(regs.primitive_type));
+        static std::unordered_set<u64> logged_draw;
+        if (logged_draw.insert(dk).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Draw: cb0={:#x}, prim={}, indices={}, clip={}, vsHash={:#x}, fsHash={:#x}",
+                     cb0, static_cast<u32>(regs.primitive_type), regs.num_indices,
+                     regs.IsClipDisabled(), vs_h, fs_h);
+        }
+    }
+
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
     if (is_indexed) {
         buffer_cache.BindIndexBuffer(index_offset, buffer_barriers);
