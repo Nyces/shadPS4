@@ -1868,13 +1868,33 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                     scsr_w > 0.0f && viewport.width >= scsr_w * rt_fit_x * 0.999f;
                 const bool converted_y =
                     scsr_h > 0.0f && std::abs(viewport.height) >= scsr_h * rt_fit_y * 0.999f;
-                if (!converted_x) {
+                // A 1080p-basis UI sprite (font / text / widget sheet) rendering into
+                // an enlarged offscreen target sits exactly where its output-surface
+                // cousin does: the pixel-to-NDC shader maps the original window, so
+                // its geometry spans half the NDC and needs the 2x-W viewport on BOTH
+                // axes. The per-axis test below only sees the converted viewport
+                // register, deems it converted, and leaves the sprite at the surface
+                // width, which confines the text to the top-left quarter. Force the
+                // doubling for these sprites, as the output-surface branch already
+                // does, and fall through to the per-axis rule for everything else.
+                const auto& sprite_vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
+                const float sprite_raw_vp_width = viewport.width;
+                const bool sprite_needs_stretch = OutputSpriteNeedsStretch(
+                    sprite_vs.pgm_hash, sprite_raw_vp_width, vo_surface_width);
+                if (sprite_needs_stretch) {
                     viewport.x *= rt_fit_x;
                     viewport.width *= rt_fit_x;
-                }
-                if (!converted_y) {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
+                } else {
+                    if (!converted_x) {
+                        viewport.x *= rt_fit_x;
+                        viewport.width *= rt_fit_x;
+                    }
+                    if (!converted_y) {
+                        viewport.y *= rt_fit_y;
+                        viewport.height *= rt_fit_y;
+                    }
                 }
                 // Report the raw register state of every distinct enlarged-target
                 // clip-enabled pass so the viewport values handed to Vulkan can be
@@ -1886,13 +1906,14 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                                    (u64(std::bit_cast<u32>(vp.xscale)) << 14) ^
                                    u64(std::bit_cast<u32>(vp.yscale));
                 if (logged_rtvp.insert(rtvp_k).second) {
-                    LOG_INFO(Render_Vulkan,
-                             "RT viewport raw: cb0={:#x}, rawVP=({},{},{},{}), "
-                             "scissor=({},{}) {}x{}, rtFit={}x{}, convertedXY={}{}",
-                             liverpool->regs.color_buffers[0].Address(), vp.xoffset, vp.yoffset,
-                             vp.xscale, vp.yscale, regs.screen_scissor.top_left_x,
-                             regs.screen_scissor.top_left_y, scsr_w, scsr_h, rt_fit_x, rt_fit_y,
-                             converted_x, converted_y);
+                    LOG_INFO(
+                        Render_Vulkan,
+                        "RT viewport raw: cb0={:#x}, rawVP=({},{},{},{}), "
+                        "scissor=({},{}) {}x{}, rtFit={}x{}, convertedXY={}{} spriteStretch={}",
+                        liverpool->regs.color_buffers[0].Address(), vp.xoffset, vp.yoffset,
+                        vp.xscale, vp.yscale, regs.screen_scissor.top_left_x,
+                        regs.screen_scissor.top_left_y, scsr_w, scsr_h, rt_fit_x, rt_fit_y,
+                        converted_x, converted_y, sprite_needs_stretch);
                 }
             }
         }
