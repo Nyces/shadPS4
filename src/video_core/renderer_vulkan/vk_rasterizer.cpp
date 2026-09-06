@@ -151,6 +151,8 @@ static bool OutputSpriteNeedsStretch(u64 vs_pgm_hash, float raw_vp_width, u32 su
     case 0x00000000788fc913ULL: // glyph quad shader: maps the 1080p window to half the
                                 // NDC, so it needs the doubled 4K viewport (verified by
                                 // post-VS geometry in a capture)
+    case 0x0000000061f0b866ULL: // enlarged-target text shader: batches 128x128 glyph
+                                // quads laid out for the 1080p window on the 4K HDR rt
     case 0x000000000ec3717aULL: // UI layer quad: draws the 1080p UI sheet and widget textures
         return true;
     default:
@@ -1875,19 +1877,41 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 // viewport already spans that region times the ratio is converted, and
                 // one that still matches the bare region is not. Decide per axis on
                 // that basis.
+                //
+                // A fully-converted viewport (both registers 4K) can still carry
+                // 1080p-basis sprite geometry: the global text pass arrives with
+                // xscale=1920/yscale=1080 (viewport already 3840x2160) while its
+                // 128x128 glyph quads are laid out for the 1080p window, so the
+                // per-axis test sees converted on both axes and stops. The same
+                // vertex program also drives scene batches whose viewport is only
+                // half-converted (x=768, y=1080), so the doubled viewport must be
+                // conditioned on BOTH axes being converted, never on the raw width
+                // (which is exactly the surface here) - otherwise the scene doubles
+                // vertically and distorts.
                 const float scsr_w = float(regs.screen_scissor.GetWidth());
                 const float scsr_h = float(regs.screen_scissor.GetHeight());
                 const bool converted_x =
                     scsr_w > 0.0f && viewport.width >= scsr_w * rt_fit_x * 0.999f;
                 const bool converted_y =
                     scsr_h > 0.0f && std::abs(viewport.height) >= scsr_h * rt_fit_y * 0.999f;
-                if (!converted_x) {
+                const auto& rt_sprite_vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
+                const bool rt_sprite_stretch =
+                    converted_x && converted_y &&
+                    OutputSpriteNeedsStretch(rt_sprite_vs.pgm_hash, viewport.width, rt_fit_width);
+                if (rt_sprite_stretch) {
                     viewport.x *= rt_fit_x;
                     viewport.width *= rt_fit_x;
-                }
-                if (!converted_y) {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
+                } else {
+                    if (!converted_x) {
+                        viewport.x *= rt_fit_x;
+                        viewport.width *= rt_fit_x;
+                    }
+                    if (!converted_y) {
+                        viewport.y *= rt_fit_y;
+                        viewport.height *= rt_fit_y;
+                    }
                 }
                 // Report the raw register state of every distinct enlarged-target
                 // clip-enabled pass so the viewport values handed to Vulkan can be
