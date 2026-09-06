@@ -1809,7 +1809,7 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
             // alongside the output surface, and applying both magnified the geometry to
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
-            if (output_upscaled && !draws_into_enlarged_target) {
+            if ((vo_pass || output_upscaled) && !draws_into_enlarged_target) {
                 // The patch does not convert the game's passes as a whole. Passes the
                 // patch missed still carry 1080p viewport registers (their raw width is
                 // half of the surface): fonts, gameplay notes and stars live there, and
@@ -1819,15 +1819,26 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 // the 4K viewport - and the 1080p UI sprite families, whose quads span
                 // half the NDC and need the doubled viewport. See
                 // OutputSpriteNeedsStretch for both rules.
+                //
+                // The output-surface entry alone decides who needs the work: a pass
+                // whose screen scissor the patch already widened to 4K cannot derive
+                // the ratio from the registers, so output_upscaled stays false even
+                // though the pass renders into the surface. The glyph passes hit this
+                // (their scissor was converted while the viewport was left at 1080p)
+                // and were skipped entirely here, leaving the halved viewport and the
+                // top-left misfit. Fall back to the 4K/1080p factor of two when the
+                // surface/register ratio is unavailable.
                 const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
                 const float raw_vp_width = viewport.width;
                 const bool stretch =
                     OutputSpriteNeedsStretch(vs_info.pgm_hash, raw_vp_width, vo_surface_width);
                 if (stretch) {
-                    viewport.x *= vo_fit_x;
-                    viewport.y *= vo_fit_y;
-                    viewport.width *= vo_fit_x;
-                    viewport.height *= vo_fit_y;
+                    const float fx = vo_fit_x > 1.001f ? vo_fit_x : 2.0f;
+                    const float fy = vo_fit_y > 1.001f ? vo_fit_y : 2.0f;
+                    viewport.x *= fx;
+                    viewport.y *= fy;
+                    viewport.width *= fx;
+                    viewport.height *= fy;
                 }
                 // Report every distinct output-surface pass with the stretch decision
                 // and the vertex-program hash that decided it, so the sprite list can be
