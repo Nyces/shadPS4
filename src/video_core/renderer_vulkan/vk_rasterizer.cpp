@@ -148,6 +148,9 @@ static bool OutputSpriteNeedsStretch(u64 vs_pgm_hash, float raw_vp_width, u32 su
         return true; // unconverted viewport: geometry still laid out for the 1080p window
     }
     switch (vs_pgm_hash) {
+    case 0x00000000788fc913ULL: // glyph quad shader: maps the 1080p window to half the
+                                // NDC, so it needs the doubled 4K viewport (verified by
+                                // post-VS geometry in a capture)
     case 0x000000000ec3717aULL: // UI layer quad: draws the 1080p UI sheet and widget textures
         return true;
     default:
