@@ -1762,33 +1762,21 @@ void Rasterizer::UpdateViewportScissorState() const {
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
             if (output_upscaled && !draws_into_enlarged_target) {
-                // A pass targeting the enlarged output surface can arrive in either of
-                // two window layouts. A pass still laid out for the game's original
-                // window (vp=(960,540,960,-540) and the scissor at 1920x1080)
-                // only reaches a fraction of the surface, and needs the ratio applied
-                // to spread its geometry over the whole frame. A pass the resolution
-                // patch already converted (vp=(1920,1080,1920,-1080), scissor already
-                // at 3840x2160) renders its vertices directly in the presentation
-                // space, and doubling its viewport would draw the geometry at twice
-                // the surface and push it off-screen.
+                // The geometry of this pass is still laid out for the game's original
+                // window, so it only reaches a fraction of the enlarged surface. Stretch
+                // the viewport by the same ratio to spread it over the whole surface.
                 //
-                // The two are indistinguishable in the viewport registers alone - the
-                // old single rule scaled every pass, which pushed the converted
-                // interface (hold circles, note rings, the wide background bands) to
-                // a 7680x4320 viewport so their top-left quarter filled the frame and
-                // the rest fell off-screen. The scissor the game writes is what
-                // separates them: the conversion always brings the window dimensions
-                // along, so an axis whose viewport already spans the enlarged surface
-                // is converted and one that still matches the original window is not.
-                // Decide per axis on that basis, mirroring the enlarged-target branch.
-                if (viewport.width < float(vo_surface_width) * 0.999f) {
-                    viewport.x *= vo_fit_x;
-                    viewport.width *= vo_fit_x;
-                }
-                if (std::abs(viewport.height) < float(vo_surface_height) * 0.999f) {
-                    viewport.y *= vo_fit_y;
-                    viewport.height *= vo_fit_y;
-                }
+                // The viewport registers cannot tell which passes need this: the UI and
+                // the scene both arrive with a viewport already spanning the surface,
+                // yet the vertices only span the original window and do need the
+                // stretch. Gating this on whether the viewport already spans the
+                // surface collapses the 2D layer into the top-left 1080p quadrant, the
+                // same regression both the scissor-based and the extent-based gates
+                // produced, so every pass targeting the surface takes the ratio.
+                viewport.x *= vo_fit_x;
+                viewport.y *= vo_fit_y;
+                viewport.width *= vo_fit_x;
+                viewport.height *= vo_fit_y;
             } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
