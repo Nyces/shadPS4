@@ -1793,19 +1793,30 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // viewport already spans that region times the ratio is converted, and
                 // one that still matches the bare region is not. Decide per axis on
                 // that basis.
+                //
+                // The target of the pass is the enlarged offscreen, whose extent
+                // rt_fit_width/rt_fit_height is the final size the viewport must not
+                // exceed. A viewport the patch already widened to the enlarged extent
+                // is converted and stays put; one still laid out for the guest window
+                // is widened and then clamped so an axis that was partially converted
+                // by the patch (its raw value sits between the guest half and the full
+                // enlarged size) cannot be doubled past the target, which previously
+                // produced widths like 6144 on a 3840 target and pushed the effects
+                // off-screen.
                 const float scsr_w = float(regs.screen_scissor.GetWidth());
                 const float scsr_h = float(regs.screen_scissor.GetHeight());
                 const bool converted_x =
-                    scsr_w > 0.0f && viewport.width >= scsr_w * rt_fit_x * 0.999f;
+                    scsr_w > 0.0f && viewport.width >= float(rt_fit_width) * 0.999f;
                 const bool converted_y =
-                    scsr_h > 0.0f && std::abs(viewport.height) >= scsr_h * rt_fit_y * 0.999f;
+                    scsr_h > 0.0f && std::abs(viewport.height) >= float(rt_fit_height) * 0.999f;
                 if (!converted_x) {
                     viewport.x *= rt_fit_x;
-                    viewport.width *= rt_fit_x;
+                    viewport.width = std::min(viewport.width * rt_fit_x, float(rt_fit_width));
                 }
                 if (!converted_y) {
                     viewport.y *= rt_fit_y;
-                    viewport.height *= rt_fit_y;
+                    viewport.height =
+                        -std::min(std::abs(viewport.height) * rt_fit_y, float(rt_fit_height));
                 }
                 // Report the raw register state of every distinct enlarged-target
                 // clip-enabled pass so the viewport values handed to Vulkan can be
