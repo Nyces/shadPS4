@@ -523,13 +523,14 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
         const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
         static std::unordered_set<u64> logged_draw;
-        const u64 d_key = (u64(regs.color_buffers[0].Address() >> 8) << 32) ^
+        const u64 d_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
                           (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
         if (logged_draw.insert(d_key).second) {
             LOG_INFO(Render_Vulkan,
                      "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
-                     regs.color_buffers[0].Address(), static_cast<u32>(regs.primitive_type),
-                     regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+                     liverpool->regs.color_buffers[0].Address(),
+                     static_cast<u32>(liverpool->regs.primitive_type),
+                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
         }
     }
 
@@ -612,13 +613,14 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
         const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
         static std::unordered_set<u64> logged_draw;
-        const u64 d_key = (u64(regs.color_buffers[0].Address() >> 8) << 32) ^
+        const u64 d_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
                           (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
         if (logged_draw.insert(d_key).second) {
             LOG_INFO(Render_Vulkan,
                      "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
-                     regs.color_buffers[0].Address(), static_cast<u32>(regs.primitive_type),
-                     regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+                     liverpool->regs.color_buffers[0].Address(),
+                     static_cast<u32>(liverpool->regs.primitive_type),
+                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
         }
     }
 
