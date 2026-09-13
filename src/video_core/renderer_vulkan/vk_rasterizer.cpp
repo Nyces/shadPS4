@@ -1854,14 +1854,32 @@ void Rasterizer::UpdateViewportScissorState() const {
                     scsr_w > 0.0f && viewport.width >= float(rt_fit_width) * 0.999f;
                 const bool converted_y =
                     scsr_h > 0.0f && std::abs(viewport.height) >= float(rt_fit_height) * 0.999f;
+                // Every scene pass of this title covers the whole frame at any
+                // resolution, so once an axis does not reach the enlarged extent it
+                // has to be widened all the way rather than clamped at whatever the
+                // doubled value happens to be. Two passes into the same target
+                // otherwise end up covering different widths (this one at 3072, a
+                // pass the patch converted at 3840), and the layer drawn by the wider
+                // pass is scaled up by the ratio and shifted toward the side the
+                // narrower one leaves uncovered. The halo rings of the live stage are
+                // drawn by such a wider pass while the idol and the stage come from
+                // the narrower one, which is what made the rings look oversized and
+                // slid to the right of the character. A viewport below half the
+                // target is a genuinely small element and keeps its own size.
+                const auto widen = [](float extent, float fit, u32 target) {
+                    const float widened = extent * fit;
+                    if (widened >= float(target) * 0.5f) {
+                        return float(target);
+                    }
+                    return widened;
+                };
                 if (!converted_x) {
                     viewport.x *= rt_fit_x;
-                    viewport.width = std::min(viewport.width * rt_fit_x, float(rt_fit_width));
+                    viewport.width = widen(viewport.width, rt_fit_x, rt_fit_width);
                 }
                 if (!converted_y) {
                     viewport.y *= rt_fit_y;
-                    viewport.height =
-                        -std::min(std::abs(viewport.height) * rt_fit_y, float(rt_fit_height));
+                    viewport.height = -widen(std::abs(viewport.height), rt_fit_y, rt_fit_height);
                 }
                 // Report the raw register state of every distinct enlarged-target
                 // clip-enabled pass so the viewport values handed to Vulkan can be
