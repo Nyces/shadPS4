@@ -1811,19 +1811,8 @@ void Rasterizer::UpdateViewportScissorState() const {
                 const bool converted_y =
                     scsr_h > 0.0f && std::abs(viewport.height) >= float(rt_fit_height) * 0.999f;
                 if (!converted_x) {
-                    // A narrow viewport register is a fixed effect size the game never
-                    // doubled for the enlarged frame. The glow/ring effects arrive with
-                    // xscale 768 (viewport 1536) on every live pass, and doubling that
-                    // stretches them to twice the size the game laid them out at, which
-                    // is what made the halo effects look oversized next to the scene.
-                    // The scene passes the patch did convert arrive at xscale 1536 or
-                    // higher; those are widened and clamped below.
-                    if (viewport.width < float(rt_fit_width) * 0.5f) {
-                        // Keep the effect at the size the game placed it.
-                    } else {
-                        viewport.x *= rt_fit_x;
-                        viewport.width = std::min(viewport.width * rt_fit_x, float(rt_fit_width));
-                    }
+                    viewport.x *= rt_fit_x;
+                    viewport.width = std::min(viewport.width * rt_fit_x, float(rt_fit_width));
                 }
                 if (!converted_y) {
                     viewport.y *= rt_fit_y;
