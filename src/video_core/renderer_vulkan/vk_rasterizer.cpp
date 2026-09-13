@@ -512,6 +512,27 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
+    // Report the shader pair behind every pass we adjust. The pass identity here
+    // matches the "Upscaled RT pass" and "Final viewport" diagnostics (same cb0,
+    // primitive and clip-disabled state), and the vs/fs hashes link the pass to
+    // one of the modules dumped under logs/shader, so a leftover effect (halo,
+    // audience, glow sticks) can be traced to the shader that draws it and then
+    // either to its constants or to the pass that lost its light. Without this
+    // the module list is a pool with no way to tell which draw ran which shader.
+    if (output_upscaled || rt_fit_x > 1.001f || presents_upscaled) {
+        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
+        static std::unordered_set<u64> logged_draw;
+        const u64 d_key = (u64(regs.color_buffers[0].Address() >> 8) << 32) ^
+                          (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
+        if (logged_draw.insert(d_key).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
+                     regs.color_buffers[0].Address(), static_cast<u32>(regs.primitive_type),
+                     regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+        }
+    }
+
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
@@ -579,6 +600,27 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
+
+    // Report the shader pair behind every pass we adjust. The pass identity here
+    // matches the "Upscaled RT pass" and "Final viewport" diagnostics (same cb0,
+    // primitive and clip-disabled state), and the vs/fs hashes link the pass to
+    // one of the modules dumped under logs/shader, so a leftover effect (halo,
+    // audience, glow sticks) can be traced to the shader that draws it and then
+    // either to its constants or to the pass that lost its light. Without this
+    // the module list is a pool with no way to tell which draw ran which shader.
+    if (output_upscaled || rt_fit_x > 1.001f || presents_upscaled) {
+        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
+        static std::unordered_set<u64> logged_draw;
+        const u64 d_key = (u64(regs.color_buffers[0].Address() >> 8) << 32) ^
+                          (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
+        if (logged_draw.insert(d_key).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
+                     regs.color_buffers[0].Address(), static_cast<u32>(regs.primitive_type),
+                     regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+        }
+    }
 
     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
     // instance offsets will be automatically applied by Vulkan from indirect args buffer.
