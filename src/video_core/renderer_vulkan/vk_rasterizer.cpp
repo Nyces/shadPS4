@@ -512,6 +512,27 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
+    // Report the shader pair behind every pass we adjust, so a pass that ends up with
+    // the wrong viewport can be traced to the shader that draws it. The pass identity
+    // here matches the "Final viewport" report emitted just above (same cb0, primitive
+    // and clip-disabled state), and the hashes link the draw to the modules dumped
+    // under logs/shader. Which side of the surface a layer belongs to cannot be read
+    // from the registers, so the mapping has to come from a run that shows the layers.
+    if (output_upscaled || rt_fit_x > 1.001f || presents_upscaled) {
+        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
+        static std::unordered_set<u64> logged_draw;
+        const u64 d_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
+                          (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
+        if (logged_draw.insert(d_key).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
+                     liverpool->regs.color_buffers[0].Address(),
+                     static_cast<u32>(liverpool->regs.primitive_type),
+                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+        }
+    }
+
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
@@ -579,6 +600,27 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
+
+    // Report the shader pair behind every pass we adjust, so a pass that ends up with
+    // the wrong viewport can be traced to the shader that draws it. The pass identity
+    // here matches the "Final viewport" report emitted just above (same cb0, primitive
+    // and clip-disabled state), and the hashes link the draw to the modules dumped
+    // under logs/shader. Which side of the surface a layer belongs to cannot be read
+    // from the registers, so the mapping has to come from a run that shows the layers.
+    if (output_upscaled || rt_fit_x > 1.001f || presents_upscaled) {
+        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
+        static std::unordered_set<u64> logged_draw;
+        const u64 d_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
+                          (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
+        if (logged_draw.insert(d_key).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
+                     liverpool->regs.color_buffers[0].Address(),
+                     static_cast<u32>(liverpool->regs.primitive_type),
+                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+        }
+    }
 
     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
     // instance offsets will be automatically applied by Vulkan from indirect args buffer.
@@ -1762,20 +1804,37 @@ void Rasterizer::UpdateViewportScissorState() const {
             // twice the surface and left the scene black.
             const bool draws_into_enlarged_target = rt_fit_x > 1.001f;
             if (output_upscaled && !draws_into_enlarged_target) {
-                // The geometry of this pass is still laid out for the game's original
-                // window, so it only reaches a fraction of the enlarged surface. Stretch
-                // the viewport by the same ratio to spread it over the whole surface.
+                // The output surface receives two kinds of pass. One the resolution
+                // patch already converted describes the whole surface in its viewport
+                // registers (vp=(1920,1080,1920,-1080), scissor 3840x2160), and since a
+                // clip-enabled pass maps NDC through its viewport it fills the surface
+                // exactly as it stands. The other is still laid out for the game's
+                // original 1080p window (vp=(960,540,960,-540), scissor 1920x1080), only
+                // reaches a fraction of the surface and needs the ratio.
                 //
-                // The viewport registers cannot tell which passes need this: the UI and
-                // the scene both arrive with a viewport already spanning the surface, yet
-                // the UI vertices only span the original window and do need the stretch.
-                // Gating this on the viewport extent was tried and shrank the interface
-                // to a quarter of the frame, the same regression the scissor-based gate
-                // produced, so every pass targeting the surface takes the ratio.
-                viewport.x *= vo_fit_x;
-                viewport.y *= vo_fit_y;
-                viewport.width *= vo_fit_x;
-                viewport.height *= vo_fit_y;
+                // Applying the ratio to both turned the converted viewports into
+                // 7680x4320 against a 3840x2160 surface. The viewport starts at x=0, so
+                // only the left half of the drawn content lands on the surface while its
+                // centre falls on the right edge, which is what put the hold circles and
+                // the note rings of the live stage at twice their size, slid to the
+                // right. The first pass of a frame runs before the ratio is established
+                // and so never received it, and it confirms these passes need none.
+                //
+                // Decide per axis on whether this pass' own viewport already spans the
+                // surface, the register state that separates the two kinds.
+                const bool covers_x =
+                    vo_surface_width > 0 && viewport.width >= float(vo_surface_width) * 0.999f;
+                const bool covers_y =
+                    vo_surface_height > 0 &&
+                    std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
+                if (!covers_x) {
+                    viewport.x *= vo_fit_x;
+                    viewport.width *= vo_fit_x;
+                }
+                if (!covers_y) {
+                    viewport.y *= vo_fit_y;
+                    viewport.height *= vo_fit_y;
+                }
             } else if (draws_into_enlarged_target) {
                 // The offscreen target of this pass is rendered at the presentation
                 // scale, so the viewport has to cover the enlarged target.
