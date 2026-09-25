@@ -45,6 +45,14 @@ static std::optional<s32> ReadConstant(const Gcn::InstOperand& operand,
     case Gcn::OperandField::LiteralConst:
         return static_cast<s32>(operand.code);
     case Gcn::OperandField::ScalarGPR:
+    case Gcn::OperandField::VccLo:
+    case Gcn::OperandField::VccHi:
+    case Gcn::OperandField::M0:
+    case Gcn::OperandField::ExecLo:
+    case Gcn::OperandField::ExecHi:
+    case Gcn::OperandField::VccZ:
+    case Gcn::OperandField::ExecZ:
+    case Gcn::OperandField::Scc:
         if (operand.code < sources.size()) {
             return sources[operand.code];
         }
