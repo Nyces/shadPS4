@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <pugixml.hpp>
@@ -846,9 +847,15 @@ int PS4_SYSV_ABI sceNpTrophyRegisterContext(OrbisNpTrophyContext context,
             // Stub success here to prevent issues specific to missing a trophy key.
         }
     } else {
-        LOG_ERROR(Lib_NpTrophy, "No npCommId found for trophy index/service_label: {}",
-                  ctx.service_label);
-        return ORBIS_NP_UTIL_ERROR_INVALID_TITLEID;
+        // npbind.dat may be missing or incomplete, which leaves the trophy map empty. Returning
+        // an error here makes the game retry the registration forever and it never gets past the
+        // loading screen, so fall through and stub success instead.
+        static std::once_flag np_comm_id_missing;
+        std::call_once(np_comm_id_missing, [&] {
+            LOG_ERROR(Lib_NpTrophy,
+                      "No npCommId found for trophy index/service_label: {}; stubbing registration",
+                      ctx.service_label);
+        });
     }
 
     ctx.registered = true;
