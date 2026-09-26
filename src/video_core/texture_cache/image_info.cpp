@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
 #include "shader_recompiler/resource.h"
@@ -10,6 +11,7 @@
 #include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/tile.h"
 
+#include <algorithm>
 #include <magic_enum/magic_enum.hpp>
 
 namespace VideoCore {
@@ -17,6 +19,23 @@ namespace VideoCore {
 using namespace Vulkan;
 using Libraries::VideoOut::TilingMode;
 using VideoOutFormat = Libraries::VideoOut::PixelFormat;
+
+u32 GetResolutionScale() {
+    const u32 width = Libraries::VideoOut::GetRegisteredBufferWidth();
+    const u32 height = Libraries::VideoOut::GetRegisteredBufferHeight();
+    if (width < 1920 || height < 1080) {
+        return 1;
+    }
+    const u32 rounded = std::min((width + 960) / 1920, (height + 540) / 1080);
+    const u32 scale = std::clamp(rounded, 1u, 4u);
+    static bool logged = false;
+    if (scale > 1 && !logged) {
+        logged = true;
+        LOG_INFO(Render_Vulkan, "Render scale {}x derived from the {}x{} display buffer.", scale,
+                 width, height);
+    }
+    return scale;
+}
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
     switch (format) {
@@ -63,8 +82,10 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
     num_samples = buffer.NumSamples();
     num_bits = NumBitsPerBlock(buffer.GetDataFmt());
     type = AmdGpu::ImageType::Color2D;
-    size.width = hint.Valid() ? hint.width : buffer.Pitch();
-    size.height = hint.Valid() ? hint.height : buffer.Height();
+    const u32 guest_height = buffer.Height();
+    const u32 scale = GetResolutionScale();
+    size.width = (hint.Valid() ? hint.width : buffer.Pitch()) * scale;
+    size.height = (hint.Valid() ? hint.height : guest_height) * scale;
     size.depth = 1;
     pitch = buffer.Pitch();
     resources.layers = buffer.NumSlices();
@@ -74,12 +95,12 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
     guest_address = buffer.Address();
     if (props.is_tiled) {
         guest_size = buffer.GetColorSliceSize() * resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, buffer.Height(), 0);
+        mips_layout[0] = MipInfo(guest_size, pitch, guest_height, 0);
     } else {
         std::tie(std::ignore, std::ignore, guest_size) =
-            ImageSizeLinearAligned(pitch, size.height, num_bits, num_samples);
+            ImageSizeLinearAligned(pitch, guest_height, num_bits, num_samples);
         guest_size *= resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
+        mips_layout[0] = MipInfo(guest_size, pitch, guest_height, 0);
     }
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && buffer.info.alt_tile_mode;
 }
@@ -95,25 +116,27 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
     props.has_stencil = buffer.stencil_info.format != AmdGpu::DepthBuffer::StencilFormat::Invalid;
     num_samples = buffer.NumSamples();
     num_bits = buffer.NumBits();
-    size.width = hint.Valid() ? hint.width : buffer.Pitch();
-    size.height = hint.Valid() ? hint.height : buffer.Height();
+    const u32 guest_height = buffer.Height();
+    const u32 scale = GetResolutionScale();
+    size.width = (hint.Valid() ? hint.width : buffer.Pitch()) * scale;
+    size.height = (hint.Valid() ? hint.height : guest_height) * scale;
     size.depth = 1;
     pitch = buffer.Pitch();
     resources.layers = num_slices;
     meta_info.htile_addr = buffer.z_info.tile_surface_enable ? htile_address : 0;
 
     stencil_addr = write_buffer ? buffer.StencilWriteAddress() : buffer.StencilAddress();
-    stencil_size = pitch * size.height * sizeof(u8);
+    stencil_size = pitch * guest_height * sizeof(u8);
 
     guest_address = write_buffer ? buffer.DepthWriteAddress() : buffer.DepthAddress();
     if (props.is_tiled) {
         guest_size = buffer.GetDepthSliceSize() * resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, buffer.Height(), 0);
+        mips_layout[0] = MipInfo(guest_size, pitch, guest_height, 0);
     } else {
         std::tie(std::ignore, std::ignore, guest_size) =
-            ImageSizeLinearAligned(pitch, size.height, num_bits, num_samples);
+            ImageSizeLinearAligned(pitch, guest_height, num_bits, num_samples);
         guest_size *= resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
+        mips_layout[0] = MipInfo(guest_size, pitch, guest_height, 0);
     }
 }
 

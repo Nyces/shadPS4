@@ -13,6 +13,11 @@ namespace Libraries::VideoOut {
 constexpr std::size_t MaxDisplayBuffers = 16;
 constexpr std::size_t MaxDisplayBufferGroups = 4;
 
+// Size of the most recently registered display buffer attribute, used by the renderer to work out
+// its render scale. Zero until the guest registers one.
+[[nodiscard]] u32 GetRegisteredBufferWidth();
+[[nodiscard]] u32 GetRegisteredBufferHeight();
+
 enum class PixelFormat : u32 {
     Unknown,
     A8R8G8B8Srgb = 0x80000000,

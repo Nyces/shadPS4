@@ -12,6 +12,7 @@
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -1112,6 +1113,12 @@ void Rasterizer::UpdateViewportScissorState() const {
     }
 
     const auto& vp_ctl = regs.viewport_control;
+    // Render target scaling: the game is authored for 1920x1080, so both the render target sizes
+    // (see ImageInfo) and the viewport and scissor rectangles are scaled by the same factor. That
+    // way guest screen space coordinates map onto the larger surface unchanged, which is what lets
+    // UI and 2D content stay in place at a higher internal resolution.
+    const u32 resolution_scale = VideoCore::GetResolutionScale();
+    const f32 resolution_scale_f = static_cast<f32>(resolution_scale);
     for (u32 i = 0; i < AmdGpu::NUM_VIEWPORTS; i++) {
         const auto& vp = regs.viewports[i];
         const auto& vp_d = regs.viewport_depths[i];
@@ -1148,18 +1155,20 @@ void Rasterizer::UpdateViewportScissorState() const {
             // window range [0..16383, 0..16383] and setting the viewport to its size.
             viewport.x = 0.f;
             viewport.y = 0.f;
-            viewport.width = float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB));
-            viewport.height = float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB));
+            viewport.width =
+                float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB * resolution_scale));
+            viewport.height =
+                float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB * resolution_scale));
         } else {
             const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
             const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;
             const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
             const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
 
-            viewport.x = xoffset - xscale;
-            viewport.y = yoffset - yscale;
-            viewport.width = xscale * 2.0f;
-            viewport.height = yscale * 2.0f;
+            viewport.x = (xoffset - xscale) * resolution_scale_f;
+            viewport.y = (yoffset - yscale) * resolution_scale_f;
+            viewport.width = xscale * 2.0f * resolution_scale_f;
+            viewport.height = yscale * 2.0f * resolution_scale_f;
         }
 
         viewports.push_back(viewport);
@@ -1176,8 +1185,10 @@ void Rasterizer::UpdateViewportScissorState() const {
                                               regs.viewport_scissors[i].bottom_right_y);
         }
         scissors.push_back({
-            .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
-            .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
+            .offset = {vp_scsr.top_left_x * static_cast<s32>(resolution_scale),
+                       vp_scsr.top_left_y * static_cast<s32>(resolution_scale)},
+            .extent = {vp_scsr.GetWidth() * resolution_scale,
+                       vp_scsr.GetHeight() * resolution_scale},
         });
     }
 

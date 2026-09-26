@@ -13,11 +13,27 @@
 #include "core/platform.h"
 #include "video_core/renderer_vulkan/vk_presenter.h"
 
+#include <atomic>
+
 extern std::unique_ptr<Vulkan::Presenter> presenter;
 
 namespace Libraries::VideoOut {
 
 static std::unique_ptr<VideoOutDriver> driver;
+
+// Size of the display buffer attribute the guest most recently registered. The renderer derives its
+// render scale from this, so a game that asks for a 1920x1080 display buffer is rendered natively
+// while one whose display buffer was raised to 3840x2160 by a patch is scaled up.
+static std::atomic<u32> registered_buffer_width{0};
+static std::atomic<u32> registered_buffer_height{0};
+
+u32 GetRegisteredBufferWidth() {
+    return registered_buffer_width.load(std::memory_order_relaxed);
+}
+
+u32 GetRegisteredBufferHeight() {
+    return registered_buffer_height.load(std::memory_order_relaxed);
+}
 
 void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, PixelFormat pixelFormat,
                                                 u32 tilingMode, u32 aspectRatio, u32 width,
@@ -35,6 +51,8 @@ void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, Pixe
     attribute->width = width;
     attribute->height = height;
     attribute->pitch_in_pixel = pitchInPixel;
+    registered_buffer_width.store(width, std::memory_order_relaxed);
+    registered_buffer_height.store(height, std::memory_order_relaxed);
     attribute->option = SCE_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE;
 }
 
