@@ -218,11 +218,42 @@ ImageView& Image::FindView(const ImageViewInfo& view_info, bool ensure_guest_sam
     return (*slot_image_views)[view_id];
 }
 
+static SubresourceRange ClampSubresourceRange(const SubresourceRange& range,
+                                              const SubresourceExtent& extent) {
+    const u32 levels = std::max(extent.levels, 1u);
+    const u32 layers = std::max(extent.layers, 1u);
+
+    SubresourceRange result = range;
+    result.base.level = std::min(result.base.level, levels - 1);
+    result.base.layer = std::min(result.base.layer, layers - 1);
+    result.extent.levels = std::clamp(result.extent.levels, 1u, levels - result.base.level);
+    result.extent.layers = std::clamp(result.extent.layers, 1u, layers - result.base.layer);
+
+    if (result != range) {
+        LOG_WARNING(Render_Vulkan,
+                    "Coercing subresource range levels {}/{} layers {}/{} to levels {}/{} layers "
+                    "{}/{}.",
+                    range.base.level, range.extent.levels, range.base.layer, range.extent.layers,
+                    result.base.level, result.extent.levels, result.base.layer,
+                    result.extent.layers);
+    }
+    return result;
+}
+
 Image::Barriers Image::GetBarriers(vk::ImageLayout dst_layout, vk::AccessFlags2 dst_mask,
                                    vk::PipelineStageFlags2 dst_stage,
                                    std::optional<SubresourceRange> subres_range) {
     auto& last_state = backing->state;
     auto& subresource_states = backing->subresource_states;
+
+    if (subres_range &&
+        (subres_range->base != SubresourceBase{} || subres_range->extent != info.resources)) {
+        // A view descriptor can ask for more levels or layers than this image actually has, for
+        // example when the guest re-used or re-laid out this guest address range for a differently
+        // shaped resource. Only subresources that exist can be transitioned, so coerce the range
+        // to the image's extent instead of overrunning the per-subresource state array.
+        subres_range = ClampSubresourceRange(*subres_range, info.resources);
+    }
 
     const bool needs_partial_transition =
         subres_range &&
@@ -719,9 +750,15 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
     SetBackingSamples(1, false);
     scheduler->EndRendering();
 
+    // These ranges originate from view descriptors and may describe more levels or layers than the
+    // backing images actually have. Coerce them once and use the result for both the transitions
+    // and the copy, so neither overruns the images' subresource state.
+    const auto src_range = ClampSubresourceRange(mrt0_range, src_image.info.resources);
+    const auto dst_range = ClampSubresourceRange(mrt1_range, info.resources);
+
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
-                      mrt0_range);
-    Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, mrt1_range);
+                      src_range);
+    Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, dst_range);
 
     const auto [src_layers, dst_layers] = SanitizeCopyLayers(src_image.info, info, 1);
     if (src_image.backing->num_samples == 1) {
@@ -729,14 +766,14 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
             .srcSubresource{
                 .aspectMask = vk::ImageAspectFlagBits::eColor,
                 .mipLevel = 0,
-                .baseArrayLayer = mrt0_range.base.layer,
+                .baseArrayLayer = src_range.base.layer,
                 .layerCount = src_layers,
             },
             .srcOffset = {0, 0, 0},
             .dstSubresource{
                 .aspectMask = vk::ImageAspectFlagBits::eColor,
                 .mipLevel = 0,
-                .baseArrayLayer = mrt1_range.base.layer,
+                .baseArrayLayer = dst_range.base.layer,
                 .layerCount = dst_layers,
             },
             .dstOffset = {0, 0, 0},
@@ -750,14 +787,14 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
             .srcSubresource{
                 .aspectMask = vk::ImageAspectFlagBits::eColor,
                 .mipLevel = 0,
-                .baseArrayLayer = mrt0_range.base.layer,
+                .baseArrayLayer = src_range.base.layer,
                 .layerCount = src_layers,
             },
             .srcOffset = {0, 0, 0},
             .dstSubresource{
                 .aspectMask = vk::ImageAspectFlagBits::eColor,
                 .mipLevel = 0,
-                .baseArrayLayer = mrt1_range.base.layer,
+                .baseArrayLayer = dst_range.base.layer,
                 .layerCount = dst_layers,
             },
             .dstOffset = {0, 0, 0},
