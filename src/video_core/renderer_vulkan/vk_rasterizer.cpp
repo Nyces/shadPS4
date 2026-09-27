@@ -1149,26 +1149,34 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.maxDepth = std::min(viewport.maxDepth, 1.f);
         }
 
+        const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
+        const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;
+        const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
+        const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
+
+        // Only viewports covering the game's authored 1920x1080 screen space are scaled, together
+        // with the render targets they draw into. A display buffer raised to 4K by a patch, and the
+        // composite pass that writes it, already work in 4K, and scaling those as well would push
+        // the whole frame off screen.
+        const bool scale_this =
+            regs.IsClipDisabled() || (xscale * 2.0f <= 1920.5f && yscale * 2.0f <= 1080.5f);
+        const f32 scale_f = scale_this ? resolution_scale_f : 1.0f;
+        const u32 scale_u = scale_this ? resolution_scale : 1u;
+
         if (regs.IsClipDisabled()) {
             // In case if clipping is disabled we patch the shader to convert vertex position
             // from screen space coordinates to NDC by defining a render space as full hardware
             // window range [0..16383, 0..16383] and setting the viewport to its size.
             viewport.x = 0.f;
             viewport.y = 0.f;
-            viewport.width =
-                float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB * resolution_scale));
+            viewport.width = float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB * scale_u));
             viewport.height =
-                float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB * resolution_scale));
+                float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB * scale_u));
         } else {
-            const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
-            const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;
-            const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
-            const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
-
-            viewport.x = (xoffset - xscale) * resolution_scale_f;
-            viewport.y = (yoffset - yscale) * resolution_scale_f;
-            viewport.width = xscale * 2.0f * resolution_scale_f;
-            viewport.height = yscale * 2.0f * resolution_scale_f;
+            viewport.x = (xoffset - xscale) * scale_f;
+            viewport.y = (yoffset - yscale) * scale_f;
+            viewport.width = xscale * 2.0f * scale_f;
+            viewport.height = yscale * 2.0f * scale_f;
         }
 
         viewports.push_back(viewport);
@@ -1185,10 +1193,9 @@ void Rasterizer::UpdateViewportScissorState() const {
                                               regs.viewport_scissors[i].bottom_right_y);
         }
         scissors.push_back({
-            .offset = {vp_scsr.top_left_x * static_cast<s32>(resolution_scale),
-                       vp_scsr.top_left_y * static_cast<s32>(resolution_scale)},
-            .extent = {vp_scsr.GetWidth() * resolution_scale,
-                       vp_scsr.GetHeight() * resolution_scale},
+            .offset = {vp_scsr.top_left_x * static_cast<s32>(scale_u),
+                       vp_scsr.top_left_y * static_cast<s32>(scale_u)},
+            .extent = {vp_scsr.GetWidth() * scale_u, vp_scsr.GetHeight() * scale_u},
         });
     }
 
