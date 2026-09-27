@@ -26,10 +26,13 @@ struct ImageResource;
 
 namespace VideoCore {
 
-// Scale factor applied to render target sizes and to the viewport/scissor rectangles. It is derived
-// from the size of the display buffer the guest registered, so a game authored for 1920x1080
-// renders natively while a display buffer raised to 3840x2160 by a patch renders everything at 2x.
-// Guest memory layout is deliberately not scaled, only the host side images.
+// Scale factor applied to the viewport and scissor rectangles of draws that still work in the
+// game's authored 1920x1080 screen space. It is derived from the size of the display buffer the
+// guest registered, so an unpatched game at 1920x1080 leaves rendering completely untouched while a
+// guest whose render targets and display buffer were raised to 4K by a patch gets its 1080p
+// viewport space projected onto those 4K surfaces. Render target sizes are deliberately not scaled
+// here: the guest owns them, so that render target and texture views of the same memory stay
+// consistent.
 [[nodiscard]] u32 GetResolutionScale();
 
 struct ImageProperties {

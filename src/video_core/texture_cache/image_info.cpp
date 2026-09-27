@@ -82,13 +82,8 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
     num_samples = buffer.NumSamples();
     num_bits = NumBitsPerBlock(buffer.GetDataFmt());
     type = AmdGpu::ImageType::Color2D;
-    const u32 guest_width = hint.Valid() ? hint.width : buffer.Pitch();
-    const u32 guest_height = hint.Valid() ? hint.height : buffer.Height();
-    // Only render targets the game keeps at its authored resolution are scaled. Anything already
-    // larger, such as a display buffer raised to 4K by a patch, is left exactly as requested.
-    const u32 scale = (guest_width <= 1920 && guest_height <= 1080) ? GetResolutionScale() : 1;
-    size.width = guest_width * scale;
-    size.height = guest_height * scale;
+    size.width = hint.Valid() ? hint.width : buffer.Pitch();
+    size.height = hint.Valid() ? hint.height : buffer.Height();
     size.depth = 1;
     pitch = buffer.Pitch();
     resources.layers = buffer.NumSlices();
@@ -98,12 +93,12 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
     guest_address = buffer.Address();
     if (props.is_tiled) {
         guest_size = buffer.GetColorSliceSize() * resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, guest_height, 0);
+        mips_layout[0] = MipInfo(guest_size, pitch, buffer.Height(), 0);
     } else {
         std::tie(std::ignore, std::ignore, guest_size) =
-            ImageSizeLinearAligned(pitch, guest_height, num_bits, num_samples);
+            ImageSizeLinearAligned(pitch, size.height, num_bits, num_samples);
         guest_size *= resources.layers;
-        mips_layout[0] = MipInfo(guest_size, pitch, guest_height, 0);
+        mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && buffer.info.alt_tile_mode;
 }
@@ -119,11 +114,9 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
     props.has_stencil = buffer.stencil_info.format != AmdGpu::DepthBuffer::StencilFormat::Invalid;
     num_samples = buffer.NumSamples();
     num_bits = buffer.NumBits();
-    const u32 guest_width = hint.Valid() ? hint.width : buffer.Pitch();
-    const u32 guest_height = hint.Valid() ? hint.height : buffer.Height();
-    const u32 scale = (guest_width <= 1920 && guest_height <= 1080) ? GetResolutionScale() : 1;
-    size.width = guest_width * scale;
-    size.height = guest_height * scale;
+    const u32 guest_height = buffer.Height();
+    size.width = hint.Valid() ? hint.width : buffer.Pitch();
+    size.height = hint.Valid() ? hint.height : guest_height;
     size.depth = 1;
     pitch = buffer.Pitch();
     resources.layers = num_slices;
