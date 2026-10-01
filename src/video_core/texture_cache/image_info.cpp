@@ -3,6 +3,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
+#include <utility>
+#include <vector>
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -42,6 +45,28 @@ u32 GetResolutionScale() {
     return scale;
 }
 
+namespace {
+std::mutex g_scaled_mutex;
+std::vector<std::pair<VAddr, u32>> g_scaled_ranges;
+
+bool IsScaledRange(VAddr address) {
+    std::scoped_lock lock{g_scaled_mutex};
+    for (const auto& [base, size] : g_scaled_ranges) {
+        if (address >= base && address < base + size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RecordScaledRange(VAddr address, u32 size) {
+    std::scoped_lock lock{g_scaled_mutex};
+    if (g_scaled_ranges.size() < 4096) {
+        g_scaled_ranges.emplace_back(address, size);
+    }
+}
+} // namespace
+
 // Grow only surfaces that match the guest's screen resolution. Only the host extent is grown; the
 // guest layout (pitch, guest_size, mips_layout) is left alone because it describes the guest's own
 // packed memory and must not overlap neighbouring surfaces. Smaller textures and already large
@@ -52,6 +77,7 @@ static void ApplyResolutionScale(ImageInfo& info) {
         info.size.height > 1152) {
         return;
     }
+    const u32 guest_size = info.guest_size;
     static std::atomic<u32> scaled_count{0};
     const u32 index = scaled_count.fetch_add(1, std::memory_order_relaxed);
     if (index < 24) {
@@ -61,6 +87,7 @@ static void ApplyResolutionScale(ImageInfo& info) {
     }
     info.size.width *= scale;
     info.size.height *= scale;
+    RecordScaledRange(info.guest_address, guest_size);
 }
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
@@ -192,6 +219,13 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
+    // If this address already backs a scaled render target, match its extent so the texture cache
+    // reuses that single image instead of creating an unscaled second image for the same memory.
+    if (IsScaledRange(image.Address())) {
+        const u32 scale = GetResolutionScale();
+        size.width *= scale;
+        size.height *= scale;
+    }
 }
 
 bool ImageInfo::IsCompatible(const ImageInfo& info) const {
