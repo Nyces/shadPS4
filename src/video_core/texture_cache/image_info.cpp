@@ -1,7 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+
 #include "common/assert.h"
+#include "common/logging/log.h"
+#include "core/emulator_settings.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
 #include "shader_recompiler/resource.h"
@@ -17,6 +21,34 @@ namespace VideoCore {
 using namespace Vulkan;
 using Libraries::VideoOut::TilingMode;
 using VideoOutFormat = Libraries::VideoOut::PixelFormat;
+
+u32 GetResolutionScale() {
+    const u32 width = EmulatorSettings.GetInternalScreenWidth();
+    const u32 height = EmulatorSettings.GetInternalScreenHeight();
+    if (width < 1920 || height < 1080) {
+        return 1;
+    }
+    const u32 rounded = std::min((width + 960) / 1920, (height + 540) / 1080);
+    const u32 scale = std::clamp(rounded, 1u, 4u);
+    static bool logged = false;
+    if (scale > 1 && !logged) {
+        logged = true;
+        LOG_INFO(Render_Vulkan, "Internal resolution scaling {}x ({}x{})", scale, width, height);
+    }
+    return scale;
+}
+
+// Grow only surfaces that match the guest's screen resolution. Smaller textures and already large
+// surfaces are left untouched so nothing is scaled twice.
+static void ApplyResolutionScale(ImageInfo& info) {
+    const u32 scale = GetResolutionScale();
+    if (scale == 1 || info.size.width < 1920 || info.size.width > 2048 || info.size.height < 720 ||
+        info.size.height > 1152) {
+        return;
+    }
+    info.size.width *= scale;
+    info.size.height *= scale;
+}
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
     switch (format) {
@@ -53,6 +85,7 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
 
     guest_address = cpu_address;
     UpdateSize();
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint) noexcept {
@@ -82,6 +115,7 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
         mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && buffer.info.alt_tile_mode;
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr htile_address,
@@ -115,6 +149,7 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
         guest_size *= resources.layers;
         mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept {
@@ -144,6 +179,7 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
+    ApplyResolutionScale(*this);
 }
 
 bool ImageInfo::IsCompatible(const ImageInfo& info) const {

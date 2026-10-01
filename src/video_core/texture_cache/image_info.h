@@ -26,6 +26,10 @@ struct ImageResource;
 
 namespace VideoCore {
 
+/// Internal resolution scale derived from the emulator settings. The guest is kept unaware, so
+/// surfaces are only grown on the host side while viewports are scaled to match.
+[[nodiscard]] u32 GetResolutionScale();
+
 struct ImageProperties {
     u32 is_volume : 1;
     u32 is_tiled : 1;
