@@ -26,24 +26,19 @@ using namespace Vulkan;
 using Libraries::VideoOut::TilingMode;
 using VideoOutFormat = Libraries::VideoOut::PixelFormat;
 
+// Internal resolution scale of the emulator. This is a build time constant on purpose: it must be
+// known before the very first image is created so that every surface in a framebuffer ends up with
+// the same size. Change this constant to raise or lower the internal rendering resolution.
+constexpr u32 kInternalResolutionScale = 2;
+
 u32 GetResolutionScale() {
-    // Derive the scale purely from the emulator setting, which is known before any image is
-    // created. Depending on the display buffer instead would let early images be created at 1x and
-    // later ones at 2x, leaving mismatched attachment sizes inside a single framebuffer.
-    const u32 width = EmulatorSettings.GetInternalScreenWidth();
-    const u32 height = EmulatorSettings.GetInternalScreenHeight();
-    if (width < 1920 || height < 1080) {
-        return 1;
-    }
-    const u32 rounded = std::min((width + 960) / 1920, (height + 540) / 1080);
-    const u32 scale = std::clamp(rounded, 1u, 4u);
     static bool logged = false;
-    if (scale > 1 && !logged) {
+    if (kInternalResolutionScale > 1 && !logged) {
         logged = true;
-        LOG_INFO(Render_Vulkan, "Internal resolution scaling {}x (internal resolution {}x{})",
-                 scale, width, height);
+        LOG_INFO(Render_Vulkan, "Internal resolution scaling {}x (build time constant)",
+                 kInternalResolutionScale);
     }
-    return scale;
+    return kInternalResolutionScale;
 }
 
 namespace {
