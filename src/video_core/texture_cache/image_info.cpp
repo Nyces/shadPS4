@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -42,12 +43,19 @@ u32 GetResolutionScale() {
 }
 
 // Grow only surfaces that match the guest's screen resolution. Smaller textures and already large
-// surfaces are left untouched so nothing is scaled twice.
+// surfaces are left untouched so nothing is scaled twice and memory stays bounded.
 static void ApplyResolutionScale(ImageInfo& info) {
     const u32 scale = GetResolutionScale();
-    if (scale == 1 || info.size.width < 1920 || info.size.width > 2048 || info.size.height < 720 ||
+    if (scale == 1 || info.size.width != 1920 || info.size.height < 1080 ||
         info.size.height > 1152) {
         return;
+    }
+    static std::atomic<u32> scaled_count{0};
+    const u32 index = scaled_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < 24) {
+        LOG_INFO(Render_Vulkan, "Scaled surface {:#x} {}x{} -> {}x{}", info.guest_address,
+                 info.size.width, info.size.height, info.size.width * scale,
+                 info.size.height * scale);
     }
     info.size.width *= scale;
     info.size.height *= scale;
@@ -182,7 +190,6 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
-    ApplyResolutionScale(*this);
 }
 
 bool ImageInfo::IsCompatible(const ImageInfo& info) const {
