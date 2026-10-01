@@ -74,6 +74,7 @@ static void ApplyResolutionScale(ImageInfo& info) {
         return;
     }
     const u32 guest_size = info.guest_size;
+    const u32 area = scale * scale;
     static std::atomic<u32> scaled_count{0};
     const u32 index = scaled_count.fetch_add(1, std::memory_order_relaxed);
     if (index < 24) {
@@ -83,6 +84,13 @@ static void ApplyResolutionScale(ImageInfo& info) {
     }
     info.size.width *= scale;
     info.size.height *= scale;
+    // The tiled layout has to grow with the surface. Sampled surfaces are fetched through this
+    // layout, so leaving it at the guest size would make every deferred lighting read land on the
+    // wrong data, which removes the whole 3D image while leaving linear 2D surfaces untouched.
+    info.pitch *= scale;
+    for (auto& mip : info.mips_layout) {
+        mip.size *= area;
+    }
     RecordScaledRange(info.guest_address, guest_size);
 }
 
