@@ -42,23 +42,35 @@ u32 GetResolutionScale() {
     return scale;
 }
 
-// Grow only surfaces that match the guest's screen resolution. Smaller textures and already large
-// surfaces are left untouched so nothing is scaled twice and memory stays bounded.
+// Grow only surfaces that match the guest's screen resolution. The extent *and* the guest layout
+// are grown together so that the tiler, which converts between the guest layout and the host image,
+// stays self consistent. Smaller textures and already large surfaces are left untouched.
 static void ApplyResolutionScale(ImageInfo& info) {
     const u32 scale = GetResolutionScale();
     if (scale == 1 || info.size.width != 1920 || info.size.height < 1080 ||
         info.size.height > 1152) {
         return;
     }
+    const u32 area = scale * scale;
     static std::atomic<u32> scaled_count{0};
     const u32 index = scaled_count.fetch_add(1, std::memory_order_relaxed);
     if (index < 24) {
-        LOG_INFO(Render_Vulkan, "Scaled surface {:#x} {}x{} -> {}x{}", info.guest_address,
-                 info.size.width, info.size.height, info.size.width * scale,
-                 info.size.height * scale);
+        LOG_INFO(Render_Vulkan, "Scaled surface {:#x} {}x{} -> {}x{} (guest_size {:#x} -> {:#x})",
+                 info.guest_address, info.size.width, info.size.height, info.size.width * scale,
+                 info.size.height * scale, info.guest_size, info.guest_size * area);
     }
     info.size.width *= scale;
     info.size.height *= scale;
+    info.pitch *= scale;
+    for (auto& mip : info.mips_layout) {
+        mip.size *= area;
+        mip.pitch *= scale;
+        mip.height *= scale;
+    }
+    info.guest_size *= area;
+    if (info.stencil_size != 0) {
+        info.stencil_size = info.pitch * info.size.height;
+    }
 }
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
