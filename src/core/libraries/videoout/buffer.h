@@ -71,4 +71,9 @@ struct VideoOutBuffer {
     uintptr_t address_right;
 };
 
+/// Size of the last display buffer registered by the guest, used to derive the internal resolution
+/// scale without relying on the emulator settings.
+u32 GetRegisteredBufferWidth();
+u32 GetRegisteredBufferHeight();
+
 } // namespace Libraries::VideoOut

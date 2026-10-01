@@ -23,8 +23,10 @@ using Libraries::VideoOut::TilingMode;
 using VideoOutFormat = Libraries::VideoOut::PixelFormat;
 
 u32 GetResolutionScale() {
-    const u32 width = EmulatorSettings.GetInternalScreenWidth();
-    const u32 height = EmulatorSettings.GetInternalScreenHeight();
+    const u32 width = std::max<u32>(Libraries::VideoOut::GetRegisteredBufferWidth(),
+                                    EmulatorSettings.GetInternalScreenWidth());
+    const u32 height = std::max<u32>(Libraries::VideoOut::GetRegisteredBufferHeight(),
+                                     EmulatorSettings.GetInternalScreenHeight());
     if (width < 1920 || height < 1080) {
         return 1;
     }
@@ -33,7 +35,8 @@ u32 GetResolutionScale() {
     static bool logged = false;
     if (scale > 1 && !logged) {
         logged = true;
-        LOG_INFO(Render_Vulkan, "Internal resolution scaling {}x ({}x{})", scale, width, height);
+        LOG_INFO(Render_Vulkan, "Internal resolution scaling {}x (display buffer {}x{})", scale,
+                 width, height);
     }
     return scale;
 }

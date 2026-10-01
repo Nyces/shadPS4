@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
@@ -19,6 +21,17 @@ namespace Libraries::VideoOut {
 
 static std::unique_ptr<VideoOutDriver> driver;
 
+static std::atomic<u32> registered_buffer_width{0};
+static std::atomic<u32> registered_buffer_height{0};
+
+u32 GetRegisteredBufferWidth() {
+    return registered_buffer_width.load(std::memory_order_relaxed);
+}
+
+u32 GetRegisteredBufferHeight() {
+    return registered_buffer_height.load(std::memory_order_relaxed);
+}
+
 void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, PixelFormat pixelFormat,
                                                 u32 tilingMode, u32 aspectRatio, u32 width,
                                                 u32 height, u32 pitchInPixel) {
@@ -36,6 +49,8 @@ void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, Pixe
     attribute->height = height;
     attribute->pitch_in_pixel = pitchInPixel;
     attribute->option = SCE_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE;
+    registered_buffer_width.store(width, std::memory_order_relaxed);
+    registered_buffer_height.store(height, std::memory_order_relaxed);
 }
 
 s32 PS4_SYSV_ABI sceVideoOutAddFlipEvent(Kernel::OrbisKernelEqueue eq, s32 handle, void* udata) {
