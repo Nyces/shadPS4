@@ -1827,23 +1827,27 @@ void Rasterizer::UpdateViewportScissorState() const {
                 const bool covers_y =
                     vo_surface_height > 0 &&
                     std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
-                // A pass that renders 3D geometry straight into the surface carries a
-                // depth attachment, and its camera was converted along with the surface,
-                // so its viewport spans the surface and divides the whole frame on its
-                // own. The 2D layers - the interface, the titles, the wide background
-                // bands - draw without depth, and their geometry is still laid out for
-                // the original window even where their registers already span the
-                // surface, so they keep needing the ratio. Without that the 2D layer
-                // collapses into the top-left quadrant as soon as the converted
-                // viewports stop being stretched.
+                // The 3D-derived content reaches the surface as triangle strips: the
+                // converted backdrop bands, drawn as strip quads that already span the
+                // surface and divide the whole frame on their own because the patch
+                // converted the camera together with it. The 2D layers arrive as
+                // triangle lists - the interface, the titles, the text, whose draws read
+                // the small atlases and carry the glyph batches - and their geometry is
+                // still laid out for the original window even where their registers
+                // already span the surface, so they keep needing the ratio. The depth
+                // attachment alone does not separate them: the text is drawn with the
+                // scene's depth state still bound, which is what collapsed it into the
+                // top-left quadrant while the strips stayed correct.
                 const bool pass_has_depth =
                     (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
                     (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid());
-                if (!covers_x || !pass_has_depth) {
+                const bool converted_content =
+                    pass_has_depth && regs.primitive_type == AmdGpu::PrimitiveType::TriangleStrip;
+                if (!covers_x || !converted_content) {
                     viewport.x *= vo_fit_x;
                     viewport.width *= vo_fit_x;
                 }
-                if (!covers_y || !pass_has_depth) {
+                if (!covers_y || !converted_content) {
                     viewport.y *= vo_fit_y;
                     viewport.height *= vo_fit_y;
                 }
