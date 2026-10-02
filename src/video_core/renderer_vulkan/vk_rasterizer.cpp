@@ -36,6 +36,15 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     return push_data;
 }
 
+// The game's vertex push constants, which is where a 2D batch keeps the projection it
+// draws itself with (the sprite shaders build their clip position as position * scale +
+// translate). Reading them back per draw is the only way to tell one 2D layer from
+// another, because two of them can reach the surface through the same pass, the same
+// viewport registers and the same depth state while their scale differs by a factor.
+static float UdFloat(const Shader::Info& info, size_t index) {
+    return index < info.user_data.size() ? std::bit_cast<float>(info.user_data[index]) : 0.0f;
+}
+
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
                        AmdGpu::Liverpool* liverpool_)
     : instance{instance_}, scheduler{scheduler_}, page_manager{this},
@@ -526,10 +535,14 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                           (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
         if (logged_draw.insert(d_key).second) {
             LOG_INFO(Render_Vulkan,
-                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
+                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
+                     "ud=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
                      liverpool->regs.color_buffers[0].Address(),
                      static_cast<u32>(liverpool->regs.primitive_type),
-                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash,
+                     UdFloat(vs_info, 0), UdFloat(vs_info, 1), UdFloat(vs_info, 2),
+                     UdFloat(vs_info, 3), UdFloat(vs_info, 4), UdFloat(vs_info, 5),
+                     UdFloat(vs_info, 6), UdFloat(vs_info, 7));
         }
     }
 
@@ -615,10 +628,14 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
                           (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
         if (logged_draw.insert(d_key).second) {
             LOG_INFO(Render_Vulkan,
-                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}",
+                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
+                     "ud=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
                      liverpool->regs.color_buffers[0].Address(),
                      static_cast<u32>(liverpool->regs.primitive_type),
-                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash);
+                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash,
+                     UdFloat(vs_info, 0), UdFloat(vs_info, 1), UdFloat(vs_info, 2),
+                     UdFloat(vs_info, 3), UdFloat(vs_info, 4), UdFloat(vs_info, 5),
+                     UdFloat(vs_info, 6), UdFloat(vs_info, 7));
         }
     }
 
