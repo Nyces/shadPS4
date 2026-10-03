@@ -537,6 +537,26 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
             const auto ud = [&](size_t index) {
                 return index < vs_info.user_data.size() ? vs_info.user_data[index] : 0u;
             };
+            // The dwords are the game's vertex user data, holding 64-bit guest addresses as
+            // (low, high) pairs. The 2D sprite shader builds its clip position from the
+            // constant buffer it points at, so reading that buffer back shows the projection
+            // each batch draws itself with. The text layer and the icon sprites beside it
+            // share a pass, a viewport and a depth state, so this is the per-draw difference.
+            const size_t cb_ptr_index[2] = {0, 2};
+            for (const size_t index : cb_ptr_index) {
+                const VAddr cb = VAddr((u64(ud(index + 1)) << 32) | u64(ud(index)));
+                if (cb == 0 || !memory->IsValidMapping(cb, 64)) {
+                    continue;
+                }
+                float values[12]{};
+                memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
+                LOG_INFO(Render_Vulkan,
+                         "Adjusted draw cb: vs={:#x}, ptr={:#x}, f=({:g},{:g},{:g},{:g},{:g},{:g},"
+                         "{:g},{:g},{:g},{:g},{:g},{:g})",
+                         vs_info.pgm_hash, cb, values[0], values[1], values[2], values[3],
+                         values[4], values[5], values[6], values[7], values[8], values[9],
+                         values[10], values[11]);
+            }
             LOG_INFO(Render_Vulkan,
                      "Adjusted draw ud: vs={:#x}, ud=({:#x},{:#x},{:#x},{:#x},"
                      "{:#x},{:#x},{:#x},{:#x})",
