@@ -535,7 +535,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                 const float enlarged[8] = {3840.0f, 0.0f, 0.0f, 0.0f, 0.0f, -2160.0f, 0.0f, 0.0f};
                 if (memory->TryWriteBacking(std::bit_cast<u8*>(instance_base), enlarged,
                                             sizeof(enlarged))) {
-                    buffer_cache.InvalidateMemory(instance_base, sizeof(enlarged));
+                    // Mark the range CPU-modified only; invalidating would first flush the
+                    // stale GPU copy back over the change and the draw would keep the old
+                    // transform.
+                    buffer_cache.ModifyMemory(instance_base, sizeof(enlarged));
                     LOG_INFO(Render_Vulkan, "Enlarged text layer instance transform: base={:#x}",
                              instance_base);
                 }

@@ -106,6 +106,10 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size);
 
+    /// Marks a buffer range as modified by the CPU so the next use re-uploads it, without
+    /// first flushing the stale GPU copy back over the change.
+    void ModifyMemory(VAddr device_addr, u64 size);
+
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);
 
