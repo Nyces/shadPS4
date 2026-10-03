@@ -1890,18 +1890,20 @@ void Rasterizer::UpdateViewportScissorState() const {
                 const bool covers_y =
                     vo_surface_height > 0 &&
                     std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
-                // The text layer draws into the output surface with a viewport that the
-                // patch already converted to span the whole surface, yet the old depth
-                // term still sent it through the ratio, stretching that viewport to
-                // twice the surface (7680) so only its left half landed on screen. Key
-                // the ratio on coverage alone: a pass whose viewport already spans the
-                // surface - a converted 2D layer or a 3D pass alike - needs none, and a
-                // pass still laid out for the original window does.
-                if (!covers_x) {
+                // The 2D layers draw without depth and their geometry stays laid out for
+                // the original window even where the registers already span the surface,
+                // so they keep needing the ratio; keying on coverage alone collapses the
+                // whole 2D stack into the top-left quadrant. A pass that renders 3D
+                // geometry into the surface carries a depth attachment and divides the
+                // frame on its own, so it only takes the ratio when it does not cover.
+                const bool pass_has_depth =
+                    (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
+                    (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid());
+                if (!covers_x || !pass_has_depth) {
                     viewport.x *= vo_fit_x;
                     viewport.width *= vo_fit_x;
                 }
-                if (!covers_y) {
+                if (!covers_y || !pass_has_depth) {
                     viewport.y *= vo_fit_y;
                     viewport.height *= vo_fit_y;
                 }
