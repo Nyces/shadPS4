@@ -511,32 +511,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    // Trial: the text layer's first vertex descriptor holds two identity transforms, so its
-    // geometry reaches the shader unscaled. Double the transform's diagonal to see whether
-    // that is the term that should have been converted to the enlarged surface, the way the
-    // layer beside it carries the window size. The batch is uploaded once, so the change has
-    // to go into the device buffer rather than guest memory.
-    if (output_upscaled &&
-        pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash == 0xb6a13818ull) {
-        const auto& text_vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
-        const auto ud = [&](size_t index) {
-            return index < text_vs.user_data.size() ? text_vs.user_data[index] : 0u;
-        };
-        const VAddr vertex_base = VAddr((u64(ud(5) & 0xFFu) << 32) | u64(ud(4)));
-        if (vertex_base != 0 && memory->IsValidMapping(vertex_base, 128)) {
-            float transform[32]{};
-            memory->CopySparseMemory(vertex_base, reinterpret_cast<u8*>(transform),
-                                     sizeof(transform));
-            transform[0] *= 2.0f;
-            transform[5] *= 2.0f;
-            transform[16] *= 2.0f;
-            transform[21] *= 2.0f;
-            buffer_cache.OverwriteMemory(vertex_base, transform, sizeof(transform));
-            LOG_INFO(Render_Vulkan, "Doubled the text layer vertex transform: base={:#x}",
-                     vertex_base);
-        }
-    }
-
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
@@ -625,6 +599,34 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      UdFloat(vs_info, 0), UdFloat(vs_info, 1), UdFloat(vs_info, 2),
                      UdFloat(vs_info, 3), UdFloat(vs_info, 4), UdFloat(vs_info, 5),
                      UdFloat(vs_info, 6), UdFloat(vs_info, 7));
+            // The text layer's own buffers only carry identity transforms, so its glyph
+            // placement has to live behind the pointer list in its second user-data pair.
+            // Follow the first few entries and dump what they reference.
+            if (vs_info.pgm_hash == 0xb6a13818ull) {
+                const VAddr list = VAddr((u64(ud(3)) << 32) | u64(ud(2)));
+                if (list != 0 && memory->IsValidMapping(list, 256)) {
+                    u32 words[64]{};
+                    memory->CopySparseMemory(list, reinterpret_cast<u8*>(words), sizeof(words));
+                    for (int r = 0; r < 4; ++r) {
+                        const VAddr target =
+                            VAddr((u64(words[r * 4 + 1]) << 32) | u64(words[r * 4]));
+                        if (target == 0 || !memory->IsValidMapping(target, 128)) {
+                            continue;
+                        }
+                        float pointee[16]{};
+                        memory->CopySparseMemory(target, reinterpret_cast<u8*>(pointee),
+                                                 sizeof(pointee));
+                        LOG_INFO(Render_Vulkan,
+                                 "Text layer pointee: ptr={:#x}, "
+                                 "f=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},"
+                                 "{:g},{:g},{:g},{:g})",
+                                 target, pointee[0], pointee[1], pointee[2], pointee[3], pointee[4],
+                                 pointee[5], pointee[6], pointee[7], pointee[8], pointee[9],
+                                 pointee[10], pointee[11], pointee[12], pointee[13], pointee[14],
+                                 pointee[15]);
+                    }
+                }
+            }
         }
     }
 
