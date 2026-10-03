@@ -579,14 +579,18 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                 if (cb == 0 || !memory->IsValidMapping(cb, 64)) {
                     continue;
                 }
-                float values[16]{};
+                float values[32]{};
                 memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
                 LOG_INFO(Render_Vulkan,
                          "Adjusted draw cb: vs={:#x}, ptr={:#x}, f=({:g},{:g},{:g},{:g},{:g},{:g},"
-                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
+                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},"
+                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
                          vs_info.pgm_hash, cb, values[0], values[1], values[2], values[3],
                          values[4], values[5], values[6], values[7], values[8], values[9],
-                         values[10], values[11], values[12], values[13], values[14], values[15]);
+                         values[10], values[11], values[12], values[13], values[14], values[15],
+                         values[16], values[17], values[18], values[19], values[20], values[21],
+                         values[22], values[23], values[24], values[25], values[26], values[27],
+                         values[28], values[29], values[30], values[31]);
             }
             // The buffer descriptors in the user data address the vertex and instance data the
             // batch is drawn from. Those coordinates are computed on the CPU before upload, so
@@ -614,10 +618,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      vs_info.pgm_hash, ud(0), ud(1), ud(2), ud(3), ud(4), ud(5), ud(6), ud(7));
             LOG_INFO(Render_Vulkan,
                      "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
-                     "ud=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
+                     "numIndices={}, numInstances={}, ud=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
                      liverpool->regs.color_buffers[0].Address(),
                      static_cast<u32>(liverpool->regs.primitive_type),
                      liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash,
+                     liverpool->regs.num_indices, liverpool->regs.num_instances.NumInstances(),
                      UdFloat(vs_info, 0), UdFloat(vs_info, 1), UdFloat(vs_info, 2),
                      UdFloat(vs_info, 3), UdFloat(vs_info, 4), UdFloat(vs_info, 5),
                      UdFloat(vs_info, 6), UdFloat(vs_info, 7));
