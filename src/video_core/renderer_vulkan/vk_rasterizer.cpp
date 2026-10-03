@@ -534,6 +534,13 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         const u64 d_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
                           (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
         if (logged_draw.insert(d_key).second) {
+            const auto ud = [&](size_t index) {
+                return index < vs_info.user_data.size() ? vs_info.user_data[index] : 0u;
+            };
+            LOG_INFO(Render_Vulkan,
+                     "Adjusted draw ud: vs={:#x}, ud=({:#x},{:#x},{:#x},{:#x},"
+                     "{:#x},{:#x},{:#x},{:#x})",
+                     vs_info.pgm_hash, ud(0), ud(1), ud(2), ud(3), ud(4), ud(5), ud(6), ud(7));
             LOG_INFO(Render_Vulkan,
                      "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
                      "ud=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
