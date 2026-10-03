@@ -106,9 +106,9 @@ public:
     /// Invalidates any buffer in the logical page range.
     void InvalidateMemory(VAddr device_addr, u64 size);
 
-    /// Marks a buffer range as modified by the CPU so the next use re-uploads it, without
-    /// first flushing the stale GPU copy back over the change.
-    void ModifyMemory(VAddr device_addr, u64 size);
+    /// Writes data straight into the buffer backing a range, so a batch that is copied to
+    /// the GPU once still sees the new contents.
+    void OverwriteMemory(VAddr address, const void* value, u32 num_bytes);
 
     /// Flushes any GPU modified buffer in the logical page range back to CPU memory.
     void ReadMemory(VAddr device_addr, u64 size, bool is_write = false);

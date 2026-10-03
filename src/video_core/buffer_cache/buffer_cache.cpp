@@ -74,11 +74,12 @@ void BufferCache::InvalidateMemory(VAddr device_addr, u64 size) {
         device_addr, size, [this, device_addr, size] { ReadMemory(device_addr, size, true); });
 }
 
-void BufferCache::ModifyMemory(VAddr device_addr, u64 size) {
-    if (!IsRegionRegistered(device_addr, size)) {
+void BufferCache::OverwriteMemory(VAddr address, const void* value, u32 num_bytes) {
+    const BufferId buffer_id = FindBuffer(address, num_bytes);
+    if (IsBufferInvalid(buffer_id)) {
         return;
     }
-    memory_tracker->MarkRegionAsCpuModified(device_addr, size);
+    WriteDataBuffer(slot_buffers[buffer_id], address, value, num_bytes);
 }
 
 void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write) {
