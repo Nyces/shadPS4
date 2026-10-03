@@ -511,6 +511,32 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    // Trial: the text layer's first vertex descriptor holds two identity transforms, so its
+    // geometry reaches the shader unscaled. Double the transform's diagonal to see whether
+    // that is the term that should have been converted to the enlarged surface, the way the
+    // layer beside it carries the window size. The batch is uploaded once, so the change has
+    // to go into the device buffer rather than guest memory.
+    if (output_upscaled &&
+        pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash == 0xb6a13818ull) {
+        const auto& text_vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
+        const auto ud = [&](size_t index) {
+            return index < text_vs.user_data.size() ? text_vs.user_data[index] : 0u;
+        };
+        const VAddr vertex_base = VAddr((u64(ud(5) & 0xFFu) << 32) | u64(ud(4)));
+        if (vertex_base != 0 && memory->IsValidMapping(vertex_base, 128)) {
+            float transform[32]{};
+            memory->CopySparseMemory(vertex_base, reinterpret_cast<u8*>(transform),
+                                     sizeof(transform));
+            transform[0] *= 2.0f;
+            transform[5] *= 2.0f;
+            transform[16] *= 2.0f;
+            transform[21] *= 2.0f;
+            buffer_cache.OverwriteMemory(vertex_base, transform, sizeof(transform));
+            LOG_INFO(Render_Vulkan, "Doubled the text layer vertex transform: base={:#x}",
+                     vertex_base);
+        }
+    }
+
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
