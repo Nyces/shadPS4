@@ -548,14 +548,14 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                 if (cb == 0 || !memory->IsValidMapping(cb, 64)) {
                     continue;
                 }
-                float values[12]{};
+                float values[16]{};
                 memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
                 LOG_INFO(Render_Vulkan,
                          "Adjusted draw cb: vs={:#x}, ptr={:#x}, f=({:g},{:g},{:g},{:g},{:g},{:g},"
-                         "{:g},{:g},{:g},{:g},{:g},{:g})",
+                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
                          vs_info.pgm_hash, cb, values[0], values[1], values[2], values[3],
                          values[4], values[5], values[6], values[7], values[8], values[9],
-                         values[10], values[11]);
+                         values[10], values[11], values[12], values[13], values[14], values[15]);
             }
             // The buffer descriptors in the user data address the vertex and instance data the
             // batch is drawn from. Those coordinates are computed on the CPU before upload, so
