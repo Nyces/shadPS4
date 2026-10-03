@@ -558,9 +558,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     // and clip-disabled state), and the hashes link the draw to the modules dumped
     // under logs/shader. Which side of the surface a layer belongs to cannot be read
     // from the registers, so the mapping has to come from a run that shows the layers.
-    // Report every distinct draw so a layer that only shows up on some screens is not
-    // missed; the set below keeps it to one line per (target, vertex shader, pixel shader).
-    if (pipeline != nullptr) {
+    if (output_upscaled || rt_fit_x > 1.001f || presents_upscaled) {
         const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
         const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
         static std::unordered_set<u64> logged_draw;
