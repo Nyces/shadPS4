@@ -1890,23 +1890,18 @@ void Rasterizer::UpdateViewportScissorState() const {
                 const bool covers_y =
                     vo_surface_height > 0 &&
                     std::abs(viewport.height) >= float(vo_surface_height) * 0.999f;
-                // A pass that renders 3D geometry straight into the surface carries a
-                // depth attachment, and its camera was converted along with the surface,
-                // so its viewport spans the surface and divides the whole frame on its
-                // own. The 2D layers - the interface, the titles, the wide background
-                // bands - draw without depth, and their geometry is still laid out for
-                // the original window even where their registers already span the
-                // surface, so they keep needing the ratio. Without that the 2D layer
-                // collapses into the top-left quadrant as soon as the converted
-                // viewports stop being stretched.
-                const bool pass_has_depth =
-                    (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
-                    (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid());
-                if (!covers_x || !pass_has_depth) {
+                // The text layer draws into the output surface with a viewport that the
+                // patch already converted to span the whole surface, yet the old depth
+                // term still sent it through the ratio, stretching that viewport to
+                // twice the surface (7680) so only its left half landed on screen. Key
+                // the ratio on coverage alone: a pass whose viewport already spans the
+                // surface - a converted 2D layer or a 3D pass alike - needs none, and a
+                // pass still laid out for the original window does.
+                if (!covers_x) {
                     viewport.x *= vo_fit_x;
                     viewport.width *= vo_fit_x;
                 }
-                if (!covers_y || !pass_has_depth) {
+                if (!covers_y) {
                     viewport.y *= vo_fit_y;
                     viewport.height *= vo_fit_y;
                 }
