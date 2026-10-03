@@ -511,7 +511,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     // behind it, which tells us where the layer that still uses the original window sits.
     {
         const u64 skip_vs = pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash;
-        if (skip_vs == 0x788fc913ull || skip_vs == 0xb6a13818ull) {
+        if (skip_vs == 0xb6a13818ull) {
             return;
         }
     }
