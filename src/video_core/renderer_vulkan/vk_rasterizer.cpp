@@ -511,36 +511,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    // The text layer is still laid out for the original window while the layers beside it
-    // were converted, so its glyphs land in the top-left quadrant of the enlarged surface.
-    // Its batch carries the original window size in the head of its instance data; rewrite
-    // that one transform to the enlarged surface so the text lines up with the rest. Only
-    // the two scale terms change, and only for a batch that still shows the old size. The
-    // batch is copied to the GPU once, so the new transform has to go into the buffer
-    // itself rather than guest memory.
-    if (output_upscaled) {
-        const auto& text_vs = pipeline->GetStage(Shader::LogicalStage::Vertex);
-        const auto ud = [&](size_t index) {
-            return index < text_vs.user_data.size() ? text_vs.user_data[index] : 0u;
-        };
-        const VAddr instance_base = VAddr((u64(ud(5) & 0xFFu) << 32) | u64(ud(4)));
-        if (instance_base != 0 && memory->IsValidMapping(instance_base, 32)) {
-            float transform[8]{};
-            memory->CopySparseMemory(instance_base, reinterpret_cast<u8*>(transform),
-                                     sizeof(transform));
-            constexpr float kWindowWidth = 1920.0f;
-            constexpr float kWindowHeight = -1080.0f;
-            if (transform[0] == kWindowWidth && transform[5] == kWindowHeight &&
-                transform[1] == 0.0f && transform[2] == 0.0f && transform[3] == 0.0f &&
-                transform[4] == 0.0f && transform[6] == 0.0f && transform[7] == 0.0f) {
-                const float enlarged[8] = {3840.0f, 0.0f, 0.0f, 0.0f, 0.0f, -2160.0f, 0.0f, 0.0f};
-                buffer_cache.OverwriteMemory(instance_base, enlarged, sizeof(enlarged));
-                LOG_INFO(Render_Vulkan, "Enlarged text layer instance transform: base={:#x}",
-                         instance_base);
-            }
-        }
-    }
-
     const auto state = BeginRendering(pipeline);
 
     buffer_cache.BindVertexBuffers(*pipeline, buffer_barriers);
