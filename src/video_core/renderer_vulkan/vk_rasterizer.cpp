@@ -506,16 +506,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    // Diagnostic: drop one candidate 2D layer at a time to see which draw paints the text.
-    // A hash listed here is skipped entirely; whatever vanishes from the frame is the draw
-    // behind it, which tells us where the layer that still uses the original window sits.
-    {
-        const u64 skip_vs = pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash;
-        if (skip_vs == 0xb6a13818ull) {
-            return;
-        }
-    }
-
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
@@ -607,20 +597,23 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
             // reading them back shows which window the layer was laid out for: the text may
             // still carry the original window's coordinates while the sprites beside it were
             // converted to the enlarged one.
-            const size_t desc_index[2] = {4, 8};
+            const size_t desc_index[4] = {0, 4, 8, 12};
             for (const size_t index : desc_index) {
                 const u64 base = (u64(ud(index + 1) & 0xFFu) << 32) | u64(ud(index));
-                if (base == 0 || !memory->IsValidMapping(base, 64)) {
+                if (base == 0 || !memory->IsValidMapping(base, 128)) {
                     continue;
                 }
-                float vtx[16]{};
+                float vtx[32]{};
                 memory->CopySparseMemory(base, reinterpret_cast<u8*>(vtx), sizeof(vtx));
                 LOG_INFO(Render_Vulkan,
                          "Adjusted draw vtx: vs={:#x}, base={:#x}, n={}, f=({:g},{:g},{:g},{:g},"
-                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
+                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},"
+                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
                          vs_info.pgm_hash, base, ud(index + 2), vtx[0], vtx[1], vtx[2], vtx[3],
                          vtx[4], vtx[5], vtx[6], vtx[7], vtx[8], vtx[9], vtx[10], vtx[11], vtx[12],
-                         vtx[13], vtx[14], vtx[15]);
+                         vtx[13], vtx[14], vtx[15], vtx[16], vtx[17], vtx[18], vtx[19], vtx[20],
+                         vtx[21], vtx[22], vtx[23], vtx[24], vtx[25], vtx[26], vtx[27], vtx[28],
+                         vtx[29], vtx[30], vtx[31]);
             }
             LOG_INFO(Render_Vulkan,
                      "Adjusted draw ud: vs={:#x}, ud=({:#x},{:#x},{:#x},{:#x},"
