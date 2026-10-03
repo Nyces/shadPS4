@@ -557,6 +557,25 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                          values[4], values[5], values[6], values[7], values[8], values[9],
                          values[10], values[11]);
             }
+            // The buffer descriptors in the user data address the vertex and instance data the
+            // batch is drawn from. Those coordinates are computed on the CPU before upload, so
+            // reading them back shows which window the layer was laid out for: the text may
+            // still carry the original window's coordinates while the sprites beside it were
+            // converted to the enlarged one.
+            const size_t desc_index[2] = {4, 8};
+            for (const size_t index : desc_index) {
+                const u64 base = (u64(ud(index + 1) & 0xFFu) << 32) | u64(ud(index));
+                if (base == 0 || !memory->IsValidMapping(base, 64)) {
+                    continue;
+                }
+                float vtx[16]{};
+                memory->CopySparseMemory(base, reinterpret_cast<u8*>(vtx), sizeof(vtx));
+                LOG_INFO(Render_Vulkan,
+                         "Adjusted draw vtx: vs={:#x}, base={:#x}, n={}, f=({:g},{:g},{:g},{:g},"
+                         "{:g},{:g},{:g},{:g})",
+                         vs_info.pgm_hash, base, ud(index + 2), vtx[0], vtx[1], vtx[2], vtx[3],
+                         vtx[4], vtx[5], vtx[6], vtx[7]);
+            }
             LOG_INFO(Render_Vulkan,
                      "Adjusted draw ud: vs={:#x}, ud=({:#x},{:#x},{:#x},{:#x},"
                      "{:#x},{:#x},{:#x},{:#x})",
