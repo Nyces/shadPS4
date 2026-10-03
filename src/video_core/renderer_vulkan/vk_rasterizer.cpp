@@ -506,6 +506,16 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    // Diagnostic: drop one candidate 2D layer at a time to see which draw paints the text.
+    // A hash listed here is skipped entirely; whatever vanishes from the frame is the draw
+    // behind it, which tells us where the layer that still uses the original window sits.
+    {
+        const u64 skip_vs = pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash;
+        if (skip_vs == 0x788fc913ull || skip_vs == 0xb6a13818ull) {
+            return;
+        }
+    }
+
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
