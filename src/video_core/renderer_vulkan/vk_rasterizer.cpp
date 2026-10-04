@@ -343,10 +343,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                                u64(static_cast<u32>(image.info.pixel_format));
             if (logged_rt.insert(rt_key).second) {
                 LOG_INFO(Render_Vulkan,
-                         "RT: {}x{} fmt={} addr={:#x} pitch={} regPitch={} regHeight={} "
+                         "RT: {}x{} decl={} fmt={} addr={:#x} pitch={} regPitch={} regHeight={} "
                          "hint={}x{} valid={} scsr={}x{} tileMax={} sliceMax={} tileMode={} "
                          "sliceSize={:#x} guestSize={:#x} samples={} upscaled={}",
                          image.info.size.width, image.info.size.height,
+                         vk::to_string(desc.info.pixel_format),
                          vk::to_string(image.info.pixel_format), col_buf.Address(),
                          image.info.pitch, col_buf.Pitch(), col_buf.Height(), hint.width,
                          hint.height, hint.Valid(),
