@@ -144,34 +144,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     } else {
         db_desc.first = {};
     }
-
-    // TEMPORARY DIAGNOSTIC: one line per unique render-target/viewport combination. This tells us
-    // whether the 3D targets are actually scaled and, crucially, whether the render target size
-    // agrees with the viewport the guest asked for.
-    {
-        static std::mutex diag_mutex;
-        static std::unordered_set<std::string> diag_seen;
-        std::scoped_lock lk{diag_mutex};
-        if (diag_seen.size() < 160) {
-            const auto& cbd0 = cb_descs[0].second.info;
-            const auto& cbd1 = cb_descs[1].second.info;
-            const auto& cbd2 = cb_descs[2].second.info;
-            const auto& cbd3 = cb_descs[3].second.info;
-            const auto& dbd = db_desc.second.info;
-            const auto& vp0 = regs.viewports[0];
-            const auto sig = fmt::format(
-                "mrt={:#x} clip={} vp={:.0f}x{:.0f} cb0={:#x}/{}x{} cb1={:#x}/{}x{} "
-                "cb2={:#x}/{}x{} cb3={:#x}/{}x{} db={:#x}/{}x{}",
-                key.mrt_mask, regs.IsClipDisabled() ? 1 : 0, vp0.xscale * 2.0f, vp0.yscale * 2.0f,
-                cbd0.guest_address, cbd0.size.width, cbd0.size.height, cbd1.guest_address,
-                cbd1.size.width, cbd1.size.height, cbd2.guest_address, cbd2.size.width,
-                cbd2.size.height, cbd3.guest_address, cbd3.size.width, cbd3.size.height,
-                dbd.guest_address, dbd.size.width, dbd.size.height);
-            if (diag_seen.insert(sig).second) {
-                LOG_INFO(Render_Vulkan, "RTDUMP {}", sig);
-            }
-        }
-    }
 }
 
 static std::pair<u32, u32> GetDrawOffsets(const AmdGpu::Regs& regs, const Shader::Info& info,
@@ -1407,6 +1379,41 @@ void Rasterizer::UpdateViewportScissorState() const {
                                   : (vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f);
         const f32 scale_f = guest_hd_space ? resolution_scale_f : 1.0f;
         const u32 scale_u = guest_hd_space ? resolution_scale : 1u;
+
+        // TEMPORARY DIAGNOSTIC: whether this pass was scaled, together with the render targets and
+        // the raw guest viewport and scissor. A 3D pass that is not scaled while its target is 4K
+        // would be confined to the top left 1080p quarter.
+        if (i == 0) {
+            static std::mutex diag_mutex;
+            static std::unordered_set<std::string> diag_seen;
+            std::scoped_lock lk{diag_mutex};
+            if (diag_seen.size() < 200) {
+                u32 cbaddr = 0;
+                u32 cbw = 0;
+                u32 cbh = 0;
+                for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+                    if (!cb_descs[cb].first) {
+                        continue;
+                    }
+                    const auto& info = cb_descs[cb].second.info;
+                    if (info.size.width * info.size.height > cbw * cbh) {
+                        cbaddr = info.guest_address;
+                        cbw = info.size.width;
+                        cbh = info.size.height;
+                    }
+                }
+                const u32 dbw = db_desc.first ? db_desc.second.info.size.width : 0;
+                const u32 dbh = db_desc.first ? db_desc.second.info.size.height : 0;
+                const auto sig = fmt::format(
+                    "gate={} scale={} clip={} vpr={:.0f}x{:.0f} scsr={}x{} cb={:#x}/{}x{} db={}x{}",
+                    guest_hd_space ? 1 : 0, scale_u, regs.IsClipDisabled() ? 1 : 0,
+                    vp.xscale * 2.0f, vp.yscale * 2.0f, scsr.GetWidth(), scsr.GetHeight(), cbaddr,
+                    cbw, cbh, dbw, dbh);
+                if (diag_seen.insert(sig).second) {
+                    LOG_INFO(Render_Vulkan, "VPGATE {}", sig);
+                }
+            }
+        }
 
         if (regs.IsClipDisabled()) {
             // In case if clipping is disabled we patch the shader to convert vertex position
