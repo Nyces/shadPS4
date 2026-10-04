@@ -1271,9 +1271,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 if (++pp_hits[k] % 60 == 1) {
                     LOG_INFO(
                         Render_Vulkan,
-                        "Post-process input: out={:#x}, reads decl={} fmt={} {}x{} addr={:#x}, "
-                        "pitch={}, gpuModified={}, upscaled={}",
-                        liverpool->regs.color_buffers[0].Address(),
+                        "Post-process input: out={:#x}, shader={:#x}, reads decl={} fmt={} {}x{} "
+                        "addr={:#x}, pitch={}, gpuModified={}, upscaled={}",
+                        liverpool->regs.color_buffers[0].Address(), stage.pgm_hash,
                         vk::to_string(desc.info.pixel_format),
                         vk::to_string(image.info.pixel_format), image.info.size.width,
                         image.info.size.height, image.info.guest_address, image.info.pitch,
@@ -1914,11 +1914,24 @@ void Rasterizer::UpdateViewportScissorState() const {
                 // surface while its glyph coordinates do not. It cannot be told apart from
                 // a converted pass by coverage and needs the ratio regardless of both tests.
                 const bool force_ratio = text_layer_upscale;
-                if (force_ratio || !covers_x || !pass_has_depth) {
+                // A pass whose viewport already spans the surface is complete on its own: the
+                // ratio cannot add detail to it, and applying it would push the viewport past
+                // the surface it draws into. A converted 1920-wide viewport doubles to 7680
+                // against a 3840 surface, which draws the content at twice the size and clips
+                // it to the top-left quadrant. Skip the ratio on those axes. The text layer is
+                // the exception: its glyph coordinates stay laid out for the original window
+                // even though its registers span the surface, so it keeps the ratio.
+                const bool overflows_x =
+                    covers_x && vo_surface_width > 0 &&
+                    viewport.width * vo_fit_x > float(vo_surface_width) * 1.001f;
+                const bool overflows_y =
+                    covers_y && vo_surface_height > 0 &&
+                    std::abs(viewport.height) * vo_fit_y > float(vo_surface_height) * 1.001f;
+                if (force_ratio || (!overflows_x && (!covers_x || !pass_has_depth))) {
                     viewport.x *= vo_fit_x;
                     viewport.width *= vo_fit_x;
                 }
-                if (force_ratio || !covers_y || !pass_has_depth) {
+                if (force_ratio || (!overflows_y && (!covers_y || !pass_has_depth))) {
                     viewport.y *= vo_fit_y;
                     viewport.height *= vo_fit_y;
                 }
