@@ -1,7 +1,15 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <mutex>
+#include <utility>
+#include <vector>
+
 #include "common/assert.h"
+#include "common/logging/log.h"
+#include "core/emulator_settings.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
 #include "shader_recompiler/resource.h"
@@ -15,6 +23,74 @@ namespace VideoCore {
 using namespace Vulkan;
 using Libraries::VideoOut::TilingMode;
 using VideoOutFormat = Libraries::VideoOut::PixelFormat;
+
+// Internal resolution scale of the emulator. This is a build time constant on purpose: it must be
+// known before the very first image is created so that every surface in a framebuffer ends up with
+// the same size. Change this constant to raise or lower the internal rendering resolution.
+constexpr u32 kInternalResolutionScale = 2;
+
+u32 GetResolutionScale() {
+    static bool logged = false;
+    if (kInternalResolutionScale > 1 && !logged) {
+        logged = true;
+        LOG_INFO(Render_Vulkan, "Internal resolution scaling {}x (build time constant)",
+                 kInternalResolutionScale);
+    }
+    return kInternalResolutionScale;
+}
+
+namespace {
+std::mutex g_scaled_mutex;
+std::vector<std::pair<VAddr, u32>> g_scaled_ranges;
+
+bool IsScaledRange(VAddr address) {
+    std::scoped_lock lock{g_scaled_mutex};
+    for (const auto& [base, size] : g_scaled_ranges) {
+        if (address >= base && address < base + size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RecordScaledRange(VAddr address, u32 size) {
+    std::scoped_lock lock{g_scaled_mutex};
+    if (g_scaled_ranges.size() < 4096) {
+        g_scaled_ranges.emplace_back(address, size);
+    }
+}
+} // namespace
+
+// Grow only surfaces that match the guest's screen resolution. Only the host extent is grown; the
+// guest layout (pitch, guest_size, mips_layout) is left alone because it describes the guest's own
+// packed memory and must not overlap neighbouring surfaces. Smaller textures and already large
+// surfaces are left untouched.
+static void ApplyResolutionScale(ImageInfo& info) {
+    const u32 scale = GetResolutionScale();
+    if (scale == 1 || info.size.width != 1920 || info.size.height < 1080 ||
+        info.size.height > 1152) {
+        return;
+    }
+    const u32 guest_size = info.guest_size;
+    const u32 area = scale * scale;
+    static std::atomic<u32> scaled_count{0};
+    const u32 index = scaled_count.fetch_add(1, std::memory_order_relaxed);
+    if (index < 24) {
+        LOG_INFO(Render_Vulkan, "Scaled surface {:#x} {}x{} -> {}x{}", info.guest_address,
+                 info.size.width, info.size.height, info.size.width * scale,
+                 info.size.height * scale);
+    }
+    info.size.width *= scale;
+    info.size.height *= scale;
+    // The tiled layout has to grow with the surface. Sampled surfaces are fetched through this
+    // layout, so leaving it at the guest size would make every deferred lighting read land on the
+    // wrong data, which removes the whole 3D image while leaving linear 2D surfaces untouched.
+    info.pitch *= scale;
+    for (auto& mip : info.mips_layout) {
+        mip.size *= area;
+    }
+    RecordScaledRange(info.guest_address, guest_size);
+}
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
     switch (format) {
@@ -51,6 +127,7 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
 
     guest_address = cpu_address;
     UpdateSize();
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint) noexcept {
@@ -80,6 +157,7 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
         mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && buffer.info.alt_tile_mode;
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr htile_address,
@@ -113,6 +191,7 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
         guest_size *= resources.layers;
         mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept {
@@ -142,6 +221,13 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
+    // If this address already backs a scaled render target, match its extent so the texture cache
+    // reuses that single image instead of creating an unscaled second image for the same memory.
+    if (IsScaledRange(image.Address())) {
+        const u32 scale = GetResolutionScale();
+        size.width *= scale;
+        size.height *= scale;
+    }
 }
 
 bool ImageInfo::IsCompatible(const ImageInfo& info) const {
