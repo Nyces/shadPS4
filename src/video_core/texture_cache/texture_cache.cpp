@@ -169,18 +169,6 @@ void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     });
 }
 
-bool TextureCache::HasImageWithOtherFormat(VAddr address, u64 guest_size, vk::Format format) {
-    std::scoped_lock lock{mutex};
-    bool found = false;
-    ForEachImageInRegion(address, guest_size, [&](ImageId, Image& image) {
-        if (image.info.guest_address == address && image.info.guest_size == guest_size &&
-            image.info.pixel_format != format) {
-            found = true;
-        }
-    });
-    return found;
-}
-
 void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {
     std::scoped_lock lk{mutex};
 
