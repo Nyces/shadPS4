@@ -36,14 +36,13 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
     return push_data;
 }
 
-// The game's vertex push constants, which is where a 2D batch keeps the projection it
-// draws itself with (the sprite shaders build their clip position as position * scale +
-// translate). Reading them back per draw is the only way to tell one 2D layer from
-// another, because two of them can reach the surface through the same pass, the same
-// viewport registers and the same depth state while their scale differs by a factor.
-static float UdFloat(const Shader::Info& info, size_t index) {
-    return index < info.user_data.size() ? std::bit_cast<float>(info.user_data[index]) : 0.0f;
-}
+// Vertex program of the UI text layer. It builds its clip position from the window size it
+// reads back from a constant buffer (position / windowSize * 2 - 1) rather than from the
+// vertex positions, so a resolution patch that enlarges the window leaves the glyph
+// coordinates unconverted. The pass viewport then already spans the surface while the
+// glyphs only reach its top-left quarter, which the coverage test cannot distinguish from
+// a pass the patch converted. Recognise the program and force the ratio onto it.
+static constexpr u64 TEXT_LAYER_VERTEX_HASH = 0xb6a13818ull;
 
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
                        AmdGpu::Liverpool* liverpool_)
@@ -268,6 +267,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     rt_fit_y = 1.0f;
     rt_fit_width = 0;
     rt_fit_height = 0;
+    text_layer_upscale =
+        pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash == TEXT_LAYER_VERTEX_HASH;
     AmdGpu::CbDbExtent vo_extent{};
     if (regs.color_control.degamma_enable) {
         LOG_WARNING(Render_Vulkan, "Color buffers require gamma correction");
@@ -522,111 +523,20 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
-    // Report the shader pair behind every pass we adjust, so a pass that ends up with
-    // the wrong viewport can be traced to the shader that draws it. The pass identity
-    // here matches the "Final viewport" report emitted just above (same cb0, primitive
-    // and clip-disabled state), and the hashes link the draw to the modules dumped
-    // under logs/shader. Which side of the surface a layer belongs to cannot be read
-    // from the registers, so the mapping has to come from a run that shows the layers.
-    if (output_upscaled || rt_fit_x > 1.001f || presents_upscaled) {
-        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
-        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
-        static std::unordered_set<u64> logged_draw;
-        const u64 d_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
-                          (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
-        if (logged_draw.insert(d_key).second) {
-            const auto ud = [&](size_t index) {
-                return index < vs_info.user_data.size() ? vs_info.user_data[index] : 0u;
-            };
-            // The dwords are the game's vertex user data, holding 64-bit guest addresses as
-            // (low, high) pairs. The 2D sprite shader builds its clip position from the
-            // constant buffer it points at, so reading that buffer back shows the projection
-            // each batch draws itself with. The text layer and the icon sprites beside it
-            // share a pass, a viewport and a depth state, so this is the per-draw difference.
-            const size_t cb_ptr_index[2] = {0, 2};
-            for (const size_t index : cb_ptr_index) {
-                const VAddr cb = VAddr((u64(ud(index + 1)) << 32) | u64(ud(index)));
-                if (cb == 0 || !memory->IsValidMapping(cb, 64)) {
-                    continue;
-                }
-                float values[32]{};
-                memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
-                LOG_INFO(Render_Vulkan,
-                         "Adjusted draw cb: vs={:#x}, ptr={:#x}, f=({:g},{:g},{:g},{:g},{:g},{:g},"
-                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},"
-                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
-                         vs_info.pgm_hash, cb, values[0], values[1], values[2], values[3],
-                         values[4], values[5], values[6], values[7], values[8], values[9],
-                         values[10], values[11], values[12], values[13], values[14], values[15],
-                         values[16], values[17], values[18], values[19], values[20], values[21],
-                         values[22], values[23], values[24], values[25], values[26], values[27],
-                         values[28], values[29], values[30], values[31]);
-            }
-            // The buffer descriptors in the user data address the vertex and instance data the
-            // batch is drawn from. Those coordinates are computed on the CPU before upload, so
-            // reading them back shows which window the layer was laid out for: the text may
-            // still carry the original window's coordinates while the sprites beside it were
-            // converted to the enlarged one.
-            const size_t desc_index[4] = {0, 4, 8, 12};
-            for (const size_t index : desc_index) {
-                const u64 base = (u64(ud(index + 1) & 0xFFu) << 32) | u64(ud(index));
-                if (base == 0 || !memory->IsValidMapping(base, 128)) {
-                    continue;
-                }
-                float vtx[32]{};
-                memory->CopySparseMemory(base, reinterpret_cast<u8*>(vtx), sizeof(vtx));
-                LOG_INFO(Render_Vulkan,
-                         "Adjusted draw vtx: vs={:#x}, base={:#x}, n={}, f=({:g},{:g},{:g},{:g},"
-                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},"
-                         "{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
-                         vs_info.pgm_hash, base, ud(index + 2), vtx[0], vtx[1], vtx[2], vtx[3],
-                         vtx[4], vtx[5], vtx[6], vtx[7], vtx[8], vtx[9], vtx[10], vtx[11], vtx[12],
-                         vtx[13], vtx[14], vtx[15], vtx[16], vtx[17], vtx[18], vtx[19], vtx[20],
-                         vtx[21], vtx[22], vtx[23], vtx[24], vtx[25], vtx[26], vtx[27], vtx[28],
-                         vtx[29], vtx[30], vtx[31]);
-            }
-            LOG_INFO(Render_Vulkan,
-                     "Adjusted draw ud: vs={:#x}, ud=({:#x},{:#x},{:#x},{:#x},"
-                     "{:#x},{:#x},{:#x},{:#x})",
-                     vs_info.pgm_hash, ud(0), ud(1), ud(2), ud(3), ud(4), ud(5), ud(6), ud(7));
-            LOG_INFO(Render_Vulkan,
-                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
-                     "numIndices={}, numInstances={}, ud=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
+    // A text-layer draw takes the window-to-surface ratio even though its viewport
+    // registers already cover the surface, because its glyph coordinates are still laid
+    // out for the original window. Report it once per output surface so the run can be
+    // matched against the "Final viewport" report above, where the doubled width shows.
+    if (text_layer_upscale) {
+        static std::unordered_set<u64> logged_text;
+        const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 8) |
+                        (liverpool->regs.IsClipDisabled() ? 8u : 0u) |
+                        u64(liverpool->regs.primitive_type);
+        if (logged_text.insert(key).second) {
+            LOG_INFO(Render_Vulkan, "Text layer: cb0={:#x}, prim={}, clipDisabled={}, ratio={}x{}",
                      liverpool->regs.color_buffers[0].Address(),
                      static_cast<u32>(liverpool->regs.primitive_type),
-                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash,
-                     liverpool->regs.num_indices, liverpool->regs.num_instances.NumInstances(),
-                     UdFloat(vs_info, 0), UdFloat(vs_info, 1), UdFloat(vs_info, 2),
-                     UdFloat(vs_info, 3), UdFloat(vs_info, 4), UdFloat(vs_info, 5),
-                     UdFloat(vs_info, 6), UdFloat(vs_info, 7));
-            // The text layer's own buffers only carry identity transforms, so its glyph
-            // placement has to live behind the pointer list in its second user-data pair.
-            // Follow the first few entries and dump what they reference.
-            if (vs_info.pgm_hash == 0xb6a13818ull) {
-                const VAddr list = VAddr((u64(ud(3)) << 32) | u64(ud(2)));
-                if (list != 0 && memory->IsValidMapping(list, 256)) {
-                    u32 words[64]{};
-                    memory->CopySparseMemory(list, reinterpret_cast<u8*>(words), sizeof(words));
-                    for (int r = 0; r < 4; ++r) {
-                        const VAddr target =
-                            VAddr((u64(words[r * 4 + 1]) << 32) | u64(words[r * 4]));
-                        if (target == 0 || !memory->IsValidMapping(target, 128)) {
-                            continue;
-                        }
-                        float pointee[16]{};
-                        memory->CopySparseMemory(target, reinterpret_cast<u8*>(pointee),
-                                                 sizeof(pointee));
-                        LOG_INFO(Render_Vulkan,
-                                 "Text layer pointee: ptr={:#x}, "
-                                 "f=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g},"
-                                 "{:g},{:g},{:g},{:g})",
-                                 target, pointee[0], pointee[1], pointee[2], pointee[3], pointee[4],
-                                 pointee[5], pointee[6], pointee[7], pointee[8], pointee[9],
-                                 pointee[10], pointee[11], pointee[12], pointee[13], pointee[14],
-                                 pointee[15]);
-                    }
-                }
-            }
+                     liverpool->regs.IsClipDisabled(), vo_fit_x, vo_fit_y);
         }
     }
 
@@ -697,31 +607,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     pipeline->BindResources(set_writes, buffer_barriers, push_data);
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
-
-    // Report the shader pair behind every pass we adjust, so a pass that ends up with
-    // the wrong viewport can be traced to the shader that draws it. The pass identity
-    // here matches the "Final viewport" report emitted just above (same cb0, primitive
-    // and clip-disabled state), and the hashes link the draw to the modules dumped
-    // under logs/shader. Which side of the surface a layer belongs to cannot be read
-    // from the registers, so the mapping has to come from a run that shows the layers.
-    if (output_upscaled || rt_fit_x > 1.001f || presents_upscaled) {
-        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
-        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
-        static std::unordered_set<u64> logged_draw;
-        const u64 d_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
-                          (u64(vs_info.pgm_hash) << 16) ^ u64(fs_info.pgm_hash);
-        if (logged_draw.insert(d_key).second) {
-            LOG_INFO(Render_Vulkan,
-                     "Adjusted draw: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
-                     "ud=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
-                     liverpool->regs.color_buffers[0].Address(),
-                     static_cast<u32>(liverpool->regs.primitive_type),
-                     liverpool->regs.IsClipDisabled(), vs_info.pgm_hash, fs_info.pgm_hash,
-                     UdFloat(vs_info, 0), UdFloat(vs_info, 1), UdFloat(vs_info, 2),
-                     UdFloat(vs_info, 3), UdFloat(vs_info, 4), UdFloat(vs_info, 5),
-                     UdFloat(vs_info, 6), UdFloat(vs_info, 7));
-        }
-    }
 
     // We can safely ignore both SGPR UD indices and results of fetch shader parsing, as vertex and
     // instance offsets will be automatically applied by Vulkan from indirect args buffer.
@@ -1937,11 +1822,16 @@ void Rasterizer::UpdateViewportScissorState() const {
                 const bool pass_has_depth =
                     (regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
                     (regs.depth_control.stencil_enable && regs.depth_buffer.StencilValid());
-                if (!covers_x || !pass_has_depth) {
+                // The text layer reads the enlarged window size back from a constant buffer
+                // to build its clip position, so its viewport registers already span the
+                // surface while its glyph coordinates do not. It cannot be told apart from
+                // a converted pass by coverage and needs the ratio regardless of both tests.
+                const bool force_ratio = text_layer_upscale;
+                if (force_ratio || !covers_x || !pass_has_depth) {
                     viewport.x *= vo_fit_x;
                     viewport.width *= vo_fit_x;
                 }
-                if (!covers_y || !pass_has_depth) {
+                if (force_ratio || !covers_y || !pass_has_depth) {
                     viewport.y *= vo_fit_y;
                     viewport.height *= vo_fit_y;
                 }

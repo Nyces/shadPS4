@@ -194,6 +194,14 @@ private:
     // presentation scale. Its contents are already at the full size, so it must not
     // receive the window-to-surface ratio the other output passes need.
     mutable bool presents_upscaled{};
+    // Set for the layers whose vertex program builds its clip position from the window
+    // size it reads back from a constant buffer instead of from the vertex positions.
+    // That buffer already holds the enlarged surface while the glyph coordinates stay
+    // laid out for the original window, so the pass viewport claims to cover the surface
+    // even though the geometry only reaches its top-left quarter. The coverage test
+    // cannot tell it apart from a pass a resolution patch converted, so these layers take
+    // the window-to-surface ratio unconditionally.
+    mutable bool text_layer_upscale{};
 };
 
 } // namespace Vulkan
