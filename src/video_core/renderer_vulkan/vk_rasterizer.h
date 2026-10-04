@@ -192,9 +192,11 @@ private:
     // enlarged extent instead, or it would resolve a second image over the same memory.
     std::unordered_map<VAddr, std::pair<u32, u32>> upscaled_targets;
     // Diagnostic: color targets 1080p or larger seen in the current frame, keyed by guest
-    // address, so a snapshot of them can be written to disk for inspection.
+    // address, so a snapshot of them can be written to disk for inspection. The counters pace
+    // the snapshots so only a couple are taken over a whole session.
     std::unordered_map<VAddr, VideoCore::ImageId> dump_targets;
-    u32 dump_pass_counter{};
+    u32 dump_frame_counter{};
+    VAddr dump_last_output{};
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
