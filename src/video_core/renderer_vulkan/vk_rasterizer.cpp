@@ -541,10 +541,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
     }
 
-    // Report the shader pair behind every pass, so a pass whose result changes under
-    // upscaling even though it binds the same inputs can be traced to the emulator
-    // selecting a different program for it. Both runs share the game's program hashes,
-    // so a differing pair here is exactly a permutation difference, reported once each.
+    // Fingerprint every distinct pass, so a layer whose result changes under upscaling
+    // can be pinned down. A pass that disappears, or one that binds fewer inputs, is only
+    // visible here, and the target extent, the viewport and the scissor tell whether its
+    // quad still covers the enlarged target. Both runs share the game's program hashes,
+    // so a differing pair is exactly a permutation difference, reported once per pass.
     {
         // A depth-only pass has no fragment stage, so read the array directly instead of
         // GetStage, which dereferences the slot unconditionally.
@@ -559,9 +560,42 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
                         (vs_hash << 20) ^ fs_hash;
         if (logged_shaders.insert(key).second) {
-            LOG_INFO(Render_Vulkan, "Pass shaders: cb0={:#x}, prim={}, vs={:#x}, fs={:#x}",
-                     liverpool->regs.color_buffers[0].Address(),
-                     static_cast<u32>(liverpool->regs.primitive_type), vs_hash, fs_hash);
+            // Count the shader's image inputs and how many of them the game actually
+            // bound this frame, so a layer that loses its source under upscaling shows
+            // as a bound count that dropped without the program changing.
+            u32 declared_inputs = 0;
+            u32 bound_inputs = 0;
+            for (const auto* stage : stages) {
+                if (!stage) {
+                    continue;
+                }
+                for (const auto& image_desc : stage->images) {
+                    ++declared_inputs;
+                    const auto tsharp = image_desc.GetSharp(*stage);
+                    if (tsharp.Address() != 0 &&
+                        tsharp.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid) {
+                        ++bound_inputs;
+                    }
+                }
+            }
+            const auto& vp = liverpool->regs.viewports[0];
+            const u32 scsr_w =
+                AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x);
+            const u32 scsr_h =
+                AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y);
+            const bool cb0_bound = static_cast<bool>(cb_descs[0].first);
+            const auto& cb0_size = cb_descs[0].second.info.size;
+            LOG_INFO(Render_Vulkan,
+                     "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
+                     "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
+                     "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}",
+                     liverpool->regs.color_buffers[0].Address(), cb0_bound ? cb0_size.width : 0u,
+                     cb0_bound ? cb0_size.height : 0u,
+                     static_cast<u32>(liverpool->regs.primitive_type),
+                     liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, bound_inputs,
+                     declared_inputs, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, scsr_w, scsr_h,
+                     liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
+                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()));
         }
     }
 
