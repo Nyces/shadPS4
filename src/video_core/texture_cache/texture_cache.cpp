@@ -507,22 +507,12 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 
-    // A render or depth target is a surface the guest defines by its format: every pass
-    // reading it later is built for that exact format, and Vulkan's compatibility
-    // classes are too coarse to stand in for it. R16G16B16A16Sfloat and R32G32Uint, for
-    // instance, share the 64-bit class, so a pass declaring an integer target would bind
-    // an existing float image over the same memory and write a surface of a different
-    // type than the passes reading it expect. Match such targets by their exact format.
-    const bool require_exact_fmt = exact_fmt || desc.type == BindingType::RenderTarget ||
-                                   desc.type == BindingType::DepthTarget;
-
     std::scoped_lock lock{mutex};
     ImageIds image_ids;
     ForEachImageInRegion(info.guest_address, info.guest_size,
                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
 
     ImageId image_id{};
-    ImageId enlarged_image_id{};
 
     // Check for a perfect match first
     for (const auto& cache_id : image_ids) {
@@ -533,30 +523,17 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (cache_image.info.guest_size != info.guest_size) {
             continue;
         }
+        if (cache_image.info.size != info.size) {
+            continue;
+        }
         if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
             (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
             continue;
         }
-        if (require_exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
+        if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
             continue;
         }
-        if (cache_image.info.size == info.size) {
-            image_id = cache_id;
-        } else if (desc.type == BindingType::Texture &&
-                   cache_image.info.size.width >= info.size.width &&
-                   cache_image.info.size.height >= info.size.height) {
-            // The same allocation is also an offscreen target the upscaler enlarged. A sample
-            // has to read that image and not the original-sized one over the same memory: the
-            // enlarged image is what the passes rendered into, while the smaller one is a
-            // second allocation nothing ever wrote, so sampling it reads stale or empty
-            // contents. The formats are only required to share a Vulkan compatibility class
-            // so the view keeps reinterpreting the enlarged image, which is exactly how the
-            // guest reads a surface it rendered with another format.
-            enlarged_image_id = cache_id;
-        }
-    }
-    if (enlarged_image_id) {
-        image_id = enlarged_image_id;
+        image_id = cache_id;
     }
 
     // Try to resolve overlaps (if any)
@@ -580,7 +557,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     if (image_id) {
         Image& image_resolved = slot_images[image_id];
-        if (require_exact_fmt && info.pixel_format != image_resolved.info.pixel_format) {
+        if (exact_fmt && info.pixel_format != image_resolved.info.pixel_format) {
             // Cannot reuse this image as we need the exact requested format.
             image_id = {};
         } else if (image_resolved.info.resources < info.resources) {
