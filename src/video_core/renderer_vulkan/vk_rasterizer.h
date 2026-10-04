@@ -189,6 +189,12 @@ private:
     // describe the original size, so the sampling path has to look the image up at the
     // enlarged extent instead, or it would resolve a second image over the same memory.
     std::unordered_map<VAddr, std::pair<u32, u32>> upscaled_targets;
+    // Offscreen targets that must keep the extent the game gave them even though they are
+    // sized for the game's window. The resolve destination belongs here: the scene is
+    // rasterized at the presentation scale, but the post-process chain was authored against
+    // the window-sized surface, so the scene is scaled down into it instead of the whole
+    // chain being enlarged. Keyed by guest address for the same reason as above.
+    std::unordered_set<VAddr> keep_at_window;
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};
