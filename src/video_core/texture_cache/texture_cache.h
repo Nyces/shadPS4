@@ -93,6 +93,12 @@ public:
     /// Evicts any images that overlap the unmapped range.
     void UnmapMemory(VAddr cpu_addr, size_t size);
 
+    /// Returns true when a range already holds an image with a different pixel format. Such a
+    /// range is shared by surfaces the game uses with two formats at the same extent, so the
+    /// presentation scale must leave it alone: enlarging one use splits it from the other and
+    /// whichever side keeps the guest extent then reads an image nothing wrote.
+    [[nodiscard]] bool HasImageWithOtherFormat(VAddr address, u64 guest_size, vk::Format format);
+
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages();
 

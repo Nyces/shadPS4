@@ -314,7 +314,9 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         const bool in_place_blit =
             regs.IsClipDisabled() && SamplesAddress(pipeline, col_buf.Address());
         if (const u32 sharp_width = desc.info.size.width, sharp_height = desc.info.size.height;
-            !in_place_blit) {
+            !in_place_blit &&
+            !texture_cache.HasImageWithOtherFormat(desc.info.guest_address, desc.info.guest_size,
+                                                   desc.info.pixel_format)) {
             // Go through the shared rule so the resolve path, which rebuilds these
             // descriptors from the same registers, enlarges exactly the same targets.
             ApplyPresentationScale(desc);
