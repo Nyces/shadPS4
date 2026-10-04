@@ -1174,13 +1174,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
-            if (rt_fit_x > 1.001f) {
-                // Report every image a pass drawing into an enlarged target reads. The
-                // scene has to reach the composition source through some chain of
-                // post-process passes, and an earlier report of the sampling side showed
-                // no pass ever reading the scene buffer itself, so the chain is not
-                // visible in the log at all. Log each input periodically, alongside the
-                // output it feeds, so the whole chain can be reconstructed.
+            {
+                // Report every image a pass reads, alongside the output it feeds, in both
+                // the native and the upscaled run. The scene reaches the composition source
+                // through a chain of post-process passes, and a layer that goes missing under
+                // upscaling only shows as the composite binding fewer inputs, which is not
+                // visible anywhere else. Log each input periodically so the steady state is
+                // captured and the two runs can be compared entry by entry.
                 static std::unordered_map<u64, u32> pp_hits;
                 const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
                               (u64(image.info.guest_address) << 12) ^ image.info.size.width;
