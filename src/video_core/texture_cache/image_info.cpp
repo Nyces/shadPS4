@@ -46,6 +46,7 @@ struct ScaledSurface {
     u32 width;
     u32 height;
     u32 pitch;
+    u32 guest_size;
 };
 std::mutex g_scaled_mutex;
 std::vector<ScaledSurface> g_scaled_ranges;
@@ -60,18 +61,18 @@ const ScaledSurface* FindScaledRange(VAddr address) {
     return nullptr;
 }
 
-void RecordScaledRange(VAddr address, u32 size, u32 width, u32 height, u32 pitch) {
+void RecordScaledRange(VAddr address, u32 size, u32 width, u32 height, u32 pitch, u32 guest_size) {
     std::scoped_lock lock{g_scaled_mutex};
     if (g_scaled_ranges.size() < 4096) {
-        g_scaled_ranges.push_back({address, size, width, height, pitch});
+        g_scaled_ranges.push_back({address, size, width, height, pitch, guest_size});
     }
 }
 } // namespace
 
-// Grow only surfaces that match the guest's screen resolution. Only the host extent is grown; the
-// guest layout (pitch, guest_size, mips_layout) is left alone because it describes the guest's own
-// packed memory and must not overlap neighbouring surfaces. Smaller textures and already large
-// surfaces are left untouched.
+// Grow only surfaces that match the guest's screen resolution. The whole layout grows together with
+// the host extent: size, pitch, mip sizes, guest_size and stencil_size stay in lockstep so the
+// memory tracker, the page watchers and the upload/download bounds describe the very same surface
+// the passes render into. Smaller textures and already large surfaces are left untouched.
 static void ApplyResolutionScale(ImageInfo& info) {
     const u32 scale = GetResolutionScale();
     if (scale == 1 || info.size.width != 1920 || info.size.height < 1080 ||
@@ -96,8 +97,14 @@ static void ApplyResolutionScale(ImageInfo& info) {
     for (auto& mip : info.mips_layout) {
         mip.size *= area;
     }
-    RecordScaledRange(info.guest_address, guest_size, info.size.width, info.size.height,
-                      info.pitch);
+    // The guest layout has to grow with the surface too. Leaving guest_size at the size the game
+    // chose keeps the memory tracker, the page watchers and the upload/download bounds describing a
+    // 1080p surface while the host image is four times larger, so everything past the first quarter
+    // never reaches the image the passes render into and the 3D disappears completely.
+    info.guest_size *= area;
+    info.stencil_size *= area;
+    RecordScaledRange(info.guest_address, guest_size, info.size.width, info.size.height, info.pitch,
+                      info.guest_size);
 }
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
@@ -244,6 +251,7 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
         size.width = scaled->width;
         size.height = scaled->height;
         pitch = scaled->pitch;
+        guest_size = scaled->guest_size;
         const u32 area = GetResolutionScale() * GetResolutionScale();
         for (auto& mip : mips_layout) {
             mip.size *= area;
