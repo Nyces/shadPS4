@@ -30,6 +30,11 @@ namespace VideoCore {
 /// surfaces are only grown on the host side while viewports are scaled to match.
 [[nodiscard]] u32 GetResolutionScale();
 
+/// True if the given guest address belongs to a surface whose host extent was enlarged by the
+/// internal resolution scaling. Passes only need their viewport scaled when they render into such a
+/// surface, which makes the decision exact instead of relying on the guest viewport heuristics.
+[[nodiscard]] bool IsScaledRange(VAddr address);
+
 struct ImageProperties {
     u32 is_volume : 1;
     u32 is_tiled : 1;

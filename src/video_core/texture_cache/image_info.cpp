@@ -69,6 +69,16 @@ void RecordScaledRange(VAddr address, u32 size, u32 width, u32 height, u32 pitch
 }
 } // namespace
 
+bool IsScaledRange(VAddr address) {
+    std::scoped_lock lock{g_scaled_mutex};
+    for (const auto& entry : g_scaled_ranges) {
+        if (address >= entry.base && address < entry.base + entry.size) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Grow only surfaces that match the guest's screen resolution. The whole layout grows together with
 // the host extent: size, pitch, mip sizes, guest_size and stencil_size stay in lockstep so the
 // memory tracker, the page watchers and the upload/download bounds describe the very same surface

@@ -1371,12 +1371,22 @@ void Rasterizer::UpdateViewportScissorState() const {
         const u32 resolution_scale = VideoCore::GetResolutionScale();
         const f32 resolution_scale_f = static_cast<f32>(resolution_scale);
 
-        // Only scale viewports the guest authored against its 1920x1080 screen space. Surfaces that
-        // are already guest sized at 4K (for example the display buffer raised by the patch) must
-        // not be magnified a second time, otherwise the content overflows the screen.
-        const bool guest_hd_space =
-            regs.IsClipDisabled() ? (scsr.GetWidth() <= 1921 && scsr.GetHeight() <= 1081)
-                                  : (vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f);
+        // Scale the viewport only when the pass actually renders into a surface whose host extent
+        // we enlarged. Surfaces that are already guest sized at 4K (for example the display buffer
+        // raised by the patch) must not be magnified a second time, otherwise the content overflows
+        // the screen. Checking the bound targets is exact, unlike the previous viewport and scissor
+        // heuristics which missed clip disabled passes.
+        bool guest_hd_space = false;
+        for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+            if (cb_descs[cb].first &&
+                VideoCore::IsScaledRange(cb_descs[cb].second.info.guest_address)) {
+                guest_hd_space = true;
+                break;
+            }
+        }
+        if (!guest_hd_space && db_desc.first) {
+            guest_hd_space = VideoCore::IsScaledRange(db_desc.second.info.guest_address);
+        }
         const f32 scale_f = guest_hd_space ? resolution_scale_f : 1.0f;
         const u32 scale_u = guest_hd_space ? resolution_scale : 1u;
 
