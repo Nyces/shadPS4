@@ -1234,15 +1234,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 static std::unordered_map<u64, u32> pp_hits;
                 const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
                               (u64(image.info.guest_address) << 12) ^ image.info.size.width;
-                if (++pp_hits[k] % 600 == 1) {
-                    LOG_INFO(Render_Vulkan,
-                             "Post-process input: out={:#x}, reads fmt={} {}x{} addr={:#x}, "
-                             "pitch={}, gpuModified={}, upscaled={}",
-                             liverpool->regs.color_buffers[0].Address(),
-                             vk::to_string(image.info.pixel_format), image.info.size.width,
-                             image.info.size.height, image.info.guest_address, image.info.pitch,
-                             True(image.flags & VideoCore::ImageFlagBits::GpuModified),
-                             upscaled_targets.contains(image.info.guest_address));
+                if (++pp_hits[k] % 60 == 1) {
+                    LOG_INFO(
+                        Render_Vulkan,
+                        "Post-process input: out={:#x}, reads decl={} fmt={} {}x{} addr={:#x}, "
+                        "pitch={}, gpuModified={}, upscaled={}",
+                        liverpool->regs.color_buffers[0].Address(),
+                        vk::to_string(desc.info.pixel_format),
+                        vk::to_string(image.info.pixel_format), image.info.size.width,
+                        image.info.size.height, image.info.guest_address, image.info.pitch,
+                        True(image.flags & VideoCore::ImageFlagBits::GpuModified),
+                        upscaled_targets.contains(image.info.guest_address));
                 }
             }
 
