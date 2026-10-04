@@ -568,6 +568,31 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
 
+    // Dump the per-draw constants of the composition layers. The shader pair and the bound
+    // inputs match between the native and the upscaled run, so the blend factor and the
+    // scales these shaders read back from their constant buffers are what is left to compare.
+    if (const u64 vs_hash = vs_info.pgm_hash;
+        vs_hash == 0x2d1f9f75ull || vs_hash == 0x105b8d9full || vs_hash == 0x406058cbull ||
+        vs_hash == 0x206c135bull || vs_hash == 0x5f49d3d1ull) {
+        static std::unordered_set<u64> logged_consts;
+        const u64 ud0 = vs_info.user_data.size() > 1 ? vs_info.user_data[0] : 0u;
+        const u64 ud1 = vs_info.user_data.size() > 1 ? vs_info.user_data[1] : 0u;
+        const VAddr cb = VAddr((ud1 << 32) | ud0);
+        const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 24) ^
+                        (vs_hash << 4) ^ (ud0 & 0xFull);
+        if (logged_consts.insert(key).second) {
+            float values[16]{};
+            if (cb != 0 && memory->IsValidMapping(cb, sizeof(values))) {
+                memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
+            }
+            LOG_INFO(Render_Vulkan,
+                     "Layer constants: cb0={:#x}, vs={:#x}, ud0={:#x}, ud1={:#x}, cb={:#x}, "
+                     "f=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
+                     liverpool->regs.color_buffers[0].Address(), vs_hash, ud0, ud1, cb, values[0],
+                     values[1], values[2], values[3], values[4], values[5], values[6], values[7]);
+        }
+    }
+
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
