@@ -507,6 +507,15 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     const auto& info = desc.info;
     ASSERT(info.guest_address != 0);
 
+    // A render or depth target is a surface the guest defines by its format: every pass
+    // reading it later is built for that exact format, and Vulkan's compatibility
+    // classes are too coarse to stand in for it. R16G16B16A16Sfloat and R32G32Uint, for
+    // instance, share the 64-bit class, so a pass declaring an integer target would bind
+    // an existing float image over the same memory and write a surface of a different
+    // type than the passes reading it expect. Match such targets by their exact format.
+    const bool require_exact_fmt = exact_fmt || desc.type == BindingType::RenderTarget ||
+                                   desc.type == BindingType::DepthTarget;
+
     std::scoped_lock lock{mutex};
     ImageIds image_ids;
     ForEachImageInRegion(info.guest_address, info.guest_size,
@@ -530,7 +539,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
             continue;
         }
-        if (exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
+        if (require_exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
             continue;
         }
         image_id = cache_id;
@@ -557,7 +566,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
 
     if (image_id) {
         Image& image_resolved = slot_images[image_id];
-        if (exact_fmt && info.pixel_format != image_resolved.info.pixel_format) {
+        if (require_exact_fmt && info.pixel_format != image_resolved.info.pixel_format) {
             // Cannot reuse this image as we need the exact requested format.
             image_id = {};
         } else if (image_resolved.info.resources < info.resources) {
