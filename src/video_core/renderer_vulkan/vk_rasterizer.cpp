@@ -359,6 +359,22 @@ void Rasterizer::DispatchDirect() {
         return;
     }
 
+    // TEMPORARY DIAGNOSTIC: bounded dump of compute dispatch dimensions. Compute dimensions come
+    // straight from the guest, so a 1080p sized dispatch writing into a scaled 4K target would only
+    // cover the top left quadrant.
+    {
+        static std::mutex diag_mutex;
+        static std::unordered_set<std::string> diag_seen;
+        std::scoped_lock lk{diag_mutex};
+        if (diag_seen.size() < 40) {
+            const auto sig =
+                fmt::format("dim={}x{}x{}", cs_program.dim_x, cs_program.dim_y, cs_program.dim_z);
+            if (diag_seen.insert(sig).second) {
+                LOG_INFO(Render_Vulkan, "CSDUMP {}", sig);
+            }
+        }
+    }
+
     if (!BindResources(pipeline)) {
         return;
     }
