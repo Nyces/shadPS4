@@ -540,6 +540,24 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
     }
 
+    // Report the shader pair behind every pass, so a pass whose result changes under
+    // upscaling even though it binds the same inputs can be traced to the emulator
+    // selecting a different program for it. Both runs share the game's program hashes,
+    // so a differing pair here is exactly a permutation difference, reported once each.
+    {
+        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
+        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
+        static std::unordered_set<u64> logged_shaders;
+        const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
+                        (u64(vs_info.pgm_hash) << 20) ^ u64(fs_info.pgm_hash);
+        if (logged_shaders.insert(key).second) {
+            LOG_INFO(Render_Vulkan, "Pass shaders: cb0={:#x}, prim={}, vs={:#x}, fs={:#x}",
+                     liverpool->regs.color_buffers[0].Address(),
+                     static_cast<u32>(liverpool->regs.primitive_type), vs_info.pgm_hash,
+                     fs_info.pgm_hash);
+        }
+    }
+
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
