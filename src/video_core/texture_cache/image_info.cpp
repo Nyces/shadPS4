@@ -40,23 +40,30 @@ u32 GetResolutionScale() {
 }
 
 namespace {
+struct ScaledSurface {
+    VAddr base;
+    u32 size;
+    u32 width;
+    u32 height;
+    u32 pitch;
+};
 std::mutex g_scaled_mutex;
-std::vector<std::pair<VAddr, u32>> g_scaled_ranges;
+std::vector<ScaledSurface> g_scaled_ranges;
 
-bool IsScaledRange(VAddr address) {
+const ScaledSurface* FindScaledRange(VAddr address) {
     std::scoped_lock lock{g_scaled_mutex};
-    for (const auto& [base, size] : g_scaled_ranges) {
-        if (address >= base && address < base + size) {
-            return true;
+    for (const auto& entry : g_scaled_ranges) {
+        if (address >= entry.base && address < entry.base + entry.size) {
+            return &entry;
         }
     }
-    return false;
+    return nullptr;
 }
 
-void RecordScaledRange(VAddr address, u32 size) {
+void RecordScaledRange(VAddr address, u32 size, u32 width, u32 height, u32 pitch) {
     std::scoped_lock lock{g_scaled_mutex};
     if (g_scaled_ranges.size() < 4096) {
-        g_scaled_ranges.emplace_back(address, size);
+        g_scaled_ranges.push_back({address, size, width, height, pitch});
     }
 }
 } // namespace
@@ -89,7 +96,8 @@ static void ApplyResolutionScale(ImageInfo& info) {
     for (auto& mip : info.mips_layout) {
         mip.size *= area;
     }
-    RecordScaledRange(info.guest_address, guest_size);
+    RecordScaledRange(info.guest_address, guest_size, info.size.width, info.size.height,
+                      info.pitch);
 }
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
@@ -221,12 +229,25 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
-    // If this address already backs a scaled render target, match its extent so the texture cache
-    // reuses that single image instead of creating an unscaled second image for the same memory.
-    if (IsScaledRange(image.Address())) {
-        const u32 scale = GetResolutionScale();
-        size.width *= scale;
-        size.height *= scale;
+    // If this address already backs a scaled render target, adopt exactly the same extent, pitch
+    // and mip layout the render path recorded. Scaling only the extent keeps the two values
+    // disagreeing, and the texture cache then keeps a second, never written image over the same
+    // memory, which is what leaves sampled layers such as the blurred background black.
+    if (const ScaledSurface* scaled = FindScaledRange(image.Address())) {
+        static std::atomic<u32> sampled_logged{0};
+        if (sampled_logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+            LOG_INFO(Render_Vulkan,
+                     "Sampled surface {:#x} {}x{} pitch {:#x} -> reuse {}x{} pitch {:#x}",
+                     guest_address, size.width, size.height, pitch, scaled->width, scaled->height,
+                     scaled->pitch);
+        }
+        size.width = scaled->width;
+        size.height = scaled->height;
+        pitch = scaled->pitch;
+        const u32 area = GetResolutionScale() * GetResolutionScale();
+        for (auto& mip : mips_layout) {
+            mip.size *= area;
+        }
     }
 }
 
