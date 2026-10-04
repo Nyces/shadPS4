@@ -1662,6 +1662,19 @@ void Rasterizer::Resolve() {
     const u32 mrt1_sharp_width = mrt1_desc.info.size.width;
     ApplyPresentationScale(mrt0_desc);
     ApplyPresentationScale(mrt1_desc);
+    // The resolve transfers one surface into another of the same shape, so the destination has
+    // to follow the extent the source ended up with. At resolve time the registers no longer
+    // describe the scene pass, so the destination cannot be recognised on its own and it stays
+    // at the window size the registers name. The destination then resolves to a second, smaller
+    // image over the same memory while the post-process passes downstream describe it at the
+    // enlarged extent and read the image that was never written, which is what left the
+    // background and the glow sticks out of the frame. Carry the source's extent over instead.
+    if (mrt0_desc.info.size.width > mrt1_desc.info.size.width &&
+        mrt1_desc.info.size.width == guest_window_width &&
+        mrt1_desc.info.size.height == guest_window_height) {
+        mrt1_desc.info.size.width = mrt0_desc.info.size.width;
+        mrt1_desc.info.size.height = mrt0_desc.info.size.height;
+    }
     // Record both sides the way the render path records the targets it enlarges. The
     // destination of a resolve never goes through the render path, so nothing else
     // would ever record it, and the post-process passes reading it describe it at the
