@@ -230,11 +230,10 @@ float Rasterizer::PresentationScale() const {
     return fit_x;
 }
 
-// Bounded diagnostic switch. When false the offscreen targets keep the extent the game gave
-// them and only the output surface is scaled, so the frame is composed from the same buffers
-// the native run uses. That separates a fault that lives in the enlargement from one that
-// exists regardless of it.
-static constexpr bool kUpscaleOffscreenTargets = false;
+// Only the offscreen targets the resolution patch actually converted are rendered at the
+// presentation scale. Every other surface the game sized for its own window is still laid out
+// for that window, so growing it crops its contents into a corner.
+static constexpr bool kUpscaleOffscreenTargets = true;
 
 void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const {
     if (!kUpscaleOffscreenTargets) {
@@ -256,6 +255,34 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     // reading it scale their coordinates themselves.
     if (desc.info.size.width != guest_window_width ||
         desc.info.size.height != guest_window_height) {
+        return;
+    }
+    // A target already rendered at the presentation scale keeps that extent for every later
+    // pass drawing into it, including the passes that would not qualify on their own. The
+    // background layers are clip disabled and still address the game's window, yet they share
+    // the scene surface, so following the recorded extent is the only way they land on the
+    // enlarged image instead of the smaller one next to it.
+    if (const auto up = upscaled_targets.find(desc.info.guest_address);
+        up != upscaled_targets.end()) {
+        desc.info.size.width = up->second.first;
+        desc.info.size.height = up->second.second;
+        return;
+    }
+    // The remaining window-sized targets divide into two kinds. The resolution patch converted
+    // the scene, so those passes describe the enlarged surface in their viewport registers: a
+    // viewport that already reaches the whole presentation-scaled surface is that signature.
+    // The 2D layers, the composition and the glow chain were left alone and their viewport
+    // still reaches only a fraction of it. They were correct before the scene grew, and growing
+    // them is what cropped the background, the light pillars and the glow sticks, so enlarge
+    // only a pass whose viewport spans the enlarged surface on both axes.
+    const auto& vp = liverpool->regs.viewports[0];
+    if (!liverpool->regs.viewport_control.xscale_enable ||
+        !liverpool->regs.viewport_control.yscale_enable) {
+        return;
+    }
+    const bool spans_x = std::abs(vp.xscale) * 2.0f >= float(vo_ext.width) * 0.999f;
+    const bool spans_y = std::abs(vp.yscale) * 2.0f >= float(vo_ext.height) * 0.999f;
+    if (!spans_x || !spans_y) {
         return;
     }
     desc.info.size.width = vo_ext.width;
@@ -323,11 +350,25 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // collapses to black. Leave such targets at the size the game chose.
         const bool in_place_blit =
             regs.IsClipDisabled() && SamplesAddress(pipeline, col_buf.Address());
-        if (const u32 sharp_width = desc.info.size.width, sharp_height = desc.info.size.height;
-            !in_place_blit) {
-            // Go through the shared rule so the resolve path, which rebuilds these
-            // descriptors from the same registers, enlarges exactly the same targets.
-            ApplyPresentationScale(desc);
+        {
+            const u32 sharp_width = desc.info.size.width;
+            const u32 sharp_height = desc.info.size.height;
+            if (!in_place_blit) {
+                // Go through the shared rule so the resolve path, which rebuilds these
+                // descriptors from the same registers, enlarges exactly the same targets. It
+                // also follows the extent of a target an earlier pass already enlarged, so the
+                // clip-disabled background layers land on the scene surface instead of the
+                // smaller image cached next to it.
+                ApplyPresentationScale(desc);
+            } else if (const auto up = upscaled_targets.find(desc.info.guest_address);
+                       up != upscaled_targets.end() && desc.info.size.width == guest_window_width &&
+                       desc.info.size.height == guest_window_height) {
+                // An in-place blit is never the pass that enlarges a target, but when an earlier
+                // pass already did, the cache has to hand back that image rather than resolve a
+                // second one over the same memory.
+                desc.info.size.width = up->second.first;
+                desc.info.size.height = up->second.second;
+            }
             if (desc.info.size.width != sharp_width) {
                 rt_fit_x = float(desc.info.size.width) / float(sharp_width);
                 rt_fit_y = float(desc.info.size.height) / float(sharp_height);
