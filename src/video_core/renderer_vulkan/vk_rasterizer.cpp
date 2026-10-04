@@ -1935,8 +1935,9 @@ void Rasterizer::UpdateViewportScissorState() const {
             .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
         });
 
-        if (i == 0 && (output_upscaled || rt_fit_x > 1.001f || presents_upscaled)) {
-            // Report what is actually handed to Vulkan for the passes we adjust. The
+        if (i == 0) {
+            // Report what is actually handed to Vulkan, in both the native and the upscaled
+            // run, so the two can be compared pass by pass. The
             // register-level diagnostics above cannot show whether a pass ended up
             // covering its target, because the correction is applied here and in the
             // push data, so a geometry that leaves the target can only be told apart
