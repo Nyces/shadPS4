@@ -400,17 +400,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             const u32 scsr_w = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x);
             const u32 scsr_h = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y);
             vo_pass = true;
-            // Snapshot the frame's large color targets a couple of times over a session. The
-            // output pass is the last one in a frame, so the scene, the effect buffers and the
-            // composition are all rendered by now. The counter advances once per buffer swap,
-            // not once per output pass: a frame binds the surface many times and keying on the
-            // pass would trigger a synchronous readback almost every frame.
-            if (dump_last_output != col_buf.Address()) {
-                dump_last_output = col_buf.Address();
-                if (++dump_frame_counter == 600u || dump_frame_counter == 2400u ||
-                    dump_frame_counter == 7200u) {
-                    DumpRecordedTargets();
-                }
+            // Snapshot the frame's large color targets periodically. The output pass is the
+            // last one in a frame, so the scene, the effect buffers and the composition are all
+            // rendered by now and can be copied out for inspection.
+            if (++dump_pass_counter >= 900u && dump_pass_counter % 300u == 0u) {
+                DumpRecordedTargets();
             }
             // Align every pass that renders into this surface to its full extent so
             // all of them share one depth attachment of a matching size, regardless
