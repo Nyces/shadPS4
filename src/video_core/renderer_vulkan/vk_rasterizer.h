@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <unordered_map>
 #include <unordered_set>
 
 #include "common/recursive_lock.h"
@@ -183,10 +184,11 @@ private:
     // covers it and must not be stretched again.
     mutable u32 rt_fit_width{};
     mutable u32 rt_fit_height{};
-    // Addresses of the offscreen targets that are being rendered at the presentation
-    // scale. Shaders sampling them describe the original size, so the same adjustment has
-    // to be applied on the sampling path or the lookup would miss the enlarged image.
-    std::unordered_set<VAddr> upscaled_targets;
+    // Offscreen targets that are rendered at the presentation scale, keyed by guest
+    // address and holding the extent they were enlarged to. Shaders sampling them
+    // describe the original size, so the sampling path has to look the image up at the
+    // enlarged extent instead, or it would resolve a second image over the same memory.
+    std::unordered_map<VAddr, std::pair<u32, u32>> upscaled_targets;
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};

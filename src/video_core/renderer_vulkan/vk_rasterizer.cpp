@@ -142,8 +142,9 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
 // the presentation scale. Such a pass is presenting the scene we already rasterized at
 // the full size, so its geometry needs no further stretching, while a pass that reads
 // none of them is drawing content still laid out for the game's original window.
-static bool SamplesUpscaledTarget(const GraphicsPipeline* pipeline,
-                                  const std::unordered_set<VAddr>& upscaled_targets) {
+static bool SamplesUpscaledTarget(
+    const GraphicsPipeline* pipeline,
+    const std::unordered_map<VAddr, std::pair<u32, u32>>& upscaled_targets) {
     if (upscaled_targets.empty()) {
         return false;
     }
@@ -323,7 +324,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 rt_fit_y = float(desc.info.size.height) / float(sharp_height);
                 rt_fit_width = desc.info.size.width;
                 rt_fit_height = desc.info.size.height;
-                upscaled_targets.insert(desc.info.guest_address);
+                upscaled_targets[desc.info.guest_address] = {desc.info.size.width,
+                                                             desc.info.size.height};
             }
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
@@ -1187,12 +1189,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             bool sampling_adjusted = false;
             u32 sharp_width = 0;
             u32 sharp_height = 0;
-            if (!upscaled_targets.empty() && upscaled_targets.contains(desc.info.guest_address)) {
+            if (const auto up = upscaled_targets.find(desc.info.guest_address);
+                up != upscaled_targets.end()) {
                 sharp_width = desc.info.size.width;
                 sharp_height = desc.info.size.height;
-                // Go through the same rule the render and the resolve paths use, so the
-                // lookup describes the target at the extent it was created at.
-                ApplyPresentationScale(desc);
+                // Look the target up at the extent the render path created it at. The
+                // recorded extent is authoritative: the game's descriptor can describe the
+                // allocation at a size the presentation-scale rule does not recognise, and
+                // applying the rule alone would then leave the lookup on the smaller image
+                // the render path never wrote.
+                if (desc.info.size.width < up->second.first &&
+                    desc.info.size.height < up->second.second) {
+                    desc.info.size.width = up->second.first;
+                    desc.info.size.height = up->second.second;
+                }
                 sampling_adjusted = desc.info.size.width != sharp_width;
                 report_sampling = true;
             }
@@ -1272,11 +1282,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     LOG_INFO(
                         Render_Vulkan,
                         "Post-process input: out={:#x}, shader={:#x}, reads decl={} fmt={} {}x{} "
-                        "addr={:#x}, pitch={}, gpuModified={}, upscaled={}",
+                        "addr={:#x}, pitch={}, ask={}x{}, descAddr={:#x}, recorded={}, "
+                        "gpuModified={}, upscaled={}",
                         liverpool->regs.color_buffers[0].Address(), stage.pgm_hash,
                         vk::to_string(desc.info.pixel_format),
                         vk::to_string(image.info.pixel_format), image.info.size.width,
                         image.info.size.height, image.info.guest_address, image.info.pitch,
+                        desc.info.size.width, desc.info.size.height, desc.info.guest_address,
+                        upscaled_targets.contains(desc.info.guest_address),
                         True(image.flags & VideoCore::ImageFlagBits::GpuModified),
                         upscaled_targets.contains(image.info.guest_address));
                 }
@@ -1606,10 +1619,12 @@ void Rasterizer::Resolve() {
     // alone and they resolve to a second, never written image over the same memory,
     // which is what kept the scene black even once the resolve itself was correct.
     if (mrt0_desc.info.size.width != mrt0_sharp_width) {
-        upscaled_targets.insert(mrt0_desc.info.guest_address);
+        upscaled_targets[mrt0_desc.info.guest_address] = {mrt0_desc.info.size.width,
+                                                          mrt0_desc.info.size.height};
     }
     if (mrt1_desc.info.size.width != mrt1_sharp_width) {
-        upscaled_targets.insert(mrt1_desc.info.guest_address);
+        upscaled_targets[mrt1_desc.info.guest_address] = {mrt1_desc.info.size.width,
+                                                          mrt1_desc.info.size.height};
     }
     auto& mrt0_image = texture_cache.GetImage(texture_cache.FindImage(mrt0_desc, true));
     auto& mrt1_image = texture_cache.GetImage(texture_cache.FindImage(mrt1_desc, true));
