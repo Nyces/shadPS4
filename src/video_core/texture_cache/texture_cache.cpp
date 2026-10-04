@@ -522,6 +522,7 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                          [&](ImageId image_id, Image& image) { image_ids.push_back(image_id); });
 
     ImageId image_id{};
+    ImageId enlarged_image_id{};
 
     // Check for a perfect match first
     for (const auto& cache_id : image_ids) {
@@ -532,9 +533,6 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (cache_image.info.guest_size != info.guest_size) {
             continue;
         }
-        if (cache_image.info.size != info.size) {
-            continue;
-        }
         if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
             (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
             continue;
@@ -542,7 +540,23 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         if (require_exact_fmt && info.pixel_format != cache_image.info.pixel_format) {
             continue;
         }
-        image_id = cache_id;
+        if (cache_image.info.size == info.size) {
+            image_id = cache_id;
+        } else if (desc.type == BindingType::Texture &&
+                   cache_image.info.size.width >= info.size.width &&
+                   cache_image.info.size.height >= info.size.height) {
+            // The same allocation is also an offscreen target the upscaler enlarged. A sample
+            // has to read that image and not the original-sized one over the same memory: the
+            // enlarged image is what the passes rendered into, while the smaller one is a
+            // second allocation nothing ever wrote, so sampling it reads stale or empty
+            // contents. The formats are only required to share a Vulkan compatibility class
+            // so the view keeps reinterpreting the enlarged image, which is exactly how the
+            // guest reads a surface it rendered with another format.
+            enlarged_image_id = cache_id;
+        }
+    }
+    if (enlarged_image_id) {
+        image_id = enlarged_image_id;
     }
 
     // Try to resolve overlaps (if any)
