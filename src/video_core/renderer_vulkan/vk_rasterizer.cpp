@@ -1,6 +1,10 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <mutex>
+#include <string>
+#include <unordered_set>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -139,6 +143,34 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image.binding.is_target = 1u;
     } else {
         db_desc.first = {};
+    }
+
+    // TEMPORARY DIAGNOSTIC: one line per unique render-target/viewport combination. This tells us
+    // whether the 3D targets are actually scaled and, crucially, whether the render target size
+    // agrees with the viewport the guest asked for.
+    {
+        static std::mutex diag_mutex;
+        static std::unordered_set<std::string> diag_seen;
+        std::scoped_lock lk{diag_mutex};
+        if (diag_seen.size() < 160) {
+            const auto& cbd0 = cb_descs[0].second.info;
+            const auto& cbd1 = cb_descs[1].second.info;
+            const auto& cbd2 = cb_descs[2].second.info;
+            const auto& cbd3 = cb_descs[3].second.info;
+            const auto& dbd = db_desc.second.info;
+            const auto& vp0 = regs.viewports[0];
+            const auto sig = fmt::format(
+                "mrt={:#x} clip={} vp={:.0f}x{:.0f} cb0={:#x}/{}x{} cb1={:#x}/{}x{} "
+                "cb2={:#x}/{}x{} cb3={:#x}/{}x{} db={:#x}/{}x{}",
+                key.mrt_mask, regs.IsClipDisabled() ? 1 : 0, vp0.xscale * 2.0f, vp0.yscale * 2.0f,
+                cbd0.guest_address, cbd0.size.width, cbd0.size.height, cbd1.guest_address,
+                cbd1.size.width, cbd1.size.height, cbd2.guest_address, cbd2.size.width,
+                cbd2.size.height, cbd3.guest_address, cbd3.size.width, cbd3.size.height,
+                dbd.guest_address, dbd.size.width, dbd.size.height);
+            if (diag_seen.insert(sig).second) {
+                LOG_INFO(Render_Vulkan, "RTDUMP {}", sig);
+            }
+        }
     }
 }
 
