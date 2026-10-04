@@ -585,6 +585,26 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                 cache_image.info.guest_size != info.guest_size) {
                 continue;
             }
+            {
+                // Report every image that shares this allocation, so it is visible whether the
+                // enlarged render target is among the candidates and what state it is in when
+                // the sample over the same address does not pick it up.
+                static std::unordered_set<u64> cand_reports;
+                const u64 cand_key = (u64(info.guest_address) << 16) ^
+                                     (u64(cache_image.info.size.width) << 8) ^
+                                     u64(static_cast<u32>(cache_image.info.pixel_format));
+                if (cand_reports.insert(cand_key).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "Sample candidate: addr={:#x}, declared={}x{}, candidate={}x{}, "
+                             "fmt={}, gpuModified={}, gpuDirty={}, isTarget={}",
+                             info.guest_address, info.size.width, info.size.height,
+                             cache_image.info.size.width, cache_image.info.size.height,
+                             vk::to_string(cache_image.info.pixel_format),
+                             True(cache_image.flags & ImageFlagBits::GpuModified),
+                             True(cache_image.flags & ImageFlagBits::GpuDirty),
+                             static_cast<u32>(cache_image.binding.is_target));
+                }
+            }
             if (cache_image.info.size.width < info.size.width ||
                 cache_image.info.size.height < info.size.height) {
                 continue;
