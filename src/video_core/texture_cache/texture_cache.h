@@ -5,7 +5,6 @@
 
 #include <condition_variable>
 #include <mutex>
-#include <string>
 #include <thread>
 #include <unordered_set>
 #include <boost/container/small_vector.hpp>
@@ -96,11 +95,6 @@ public:
 
     /// Schedules a copy of pending images for download back to CPU memory.
     void ProcessDownloadImages();
-
-    /// Diagnostic. Copies up to `max_width` leftmost columns of an image into a host buffer and
-    /// writes them out as a 24-bit BMP, so a render target's contents can be inspected without a
-    /// GPU debugger. Float formats are tone mapped for viewing.
-    void DumpTargetToBmp(ImageId image_id, const std::string& path, u32 max_width);
 
     /// Retrieves the image handle of the image with the provided attributes.
     [[nodiscard]] ImageId FindImage(ImageDesc& desc, bool exact_fmt = false);

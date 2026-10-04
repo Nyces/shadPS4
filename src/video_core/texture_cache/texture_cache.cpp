@@ -1,13 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <algorithm>
-#include <cmath>
-#include <cstring>
-#include <fstream>
-#include <limits>
 #include <unordered_set>
-#include <vector>
 
 #include <xxhash.h>
 
@@ -74,117 +68,6 @@ void TextureCache::ProcessDownloadImages() {
         DownloadImageMemory(image_id, true);
     }
     download_images.clear();
-}
-
-namespace {
-/// Converts a half float to an 8 bit channel, applying a gamma curve so dim HDR content stays
-/// visible in the dump.
-u8 HalfToByte(u16 bits) {
-    const u32 sign = (bits >> 15) & 1u;
-    const u32 exponent = (bits >> 10) & 0x1Fu;
-    const u32 mantissa = bits & 0x3FFu;
-    float value = 0.0f;
-    if (exponent == 0) {
-        value = std::ldexp(float(mantissa), -24);
-    } else if (exponent == 31) {
-        value = 1.0f;
-    } else {
-        value = std::ldexp(float(mantissa | 0x400u), int(exponent) - 25);
-    }
-    value = sign != 0 ? -value : value;
-    return u8(std::sqrt(std::clamp(value, 0.0f, 1.0f)) * 255.0f + 0.5f);
-}
-
-/// Writes a bottom-up 24 bit BMP. `pixels` holds tightly packed rows of `bytes_per_pixel` byte
-/// channels; the first the channels are taken as red, green, blue.
-void WriteBmp(const std::string& path, const u8* pixels, u32 width, u32 height,
-              u32 bytes_per_pixel) {
-    const u32 stride = ((width * 3u + 3u) / 4u) * 4u;
-    const u32 image_size = stride * height;
-    const u32 data_offset = 54u;
-    std::vector<u8> file(data_offset + image_size, 0u);
-    const u32 file_size = data_offset + image_size;
-    const u32 dib_size = 40u;
-    const s32 bmp_width = s32(width);
-    const s32 bmp_height = s32(height);
-    const u16 planes = 1u;
-    const u16 bits = 24u;
-    std::memcpy(&file[0], "BM", 2);
-    std::memcpy(&file[2], &file_size, 4);
-    std::memcpy(&file[10], &data_offset, 4);
-    std::memcpy(&file[14], &dib_size, 4);
-    std::memcpy(&file[18], &bmp_width, 4);
-    std::memcpy(&file[22], &bmp_height, 4);
-    std::memcpy(&file[26], &planes, 2);
-    std::memcpy(&file[28], &bits, 2);
-    std::memcpy(&file[34], &image_size, 4);
-    for (u32 y = 0; y < height; ++y) {
-        const u8* src = pixels + u64(height - 1u - y) * u64(width) * bytes_per_pixel;
-        u8* dst = file.data() + data_offset + u64(y) * stride;
-        for (u32 x = 0; x < width; ++x) {
-            u8 r;
-            u8 g;
-            u8 b;
-            if (bytes_per_pixel == 4u) {
-                r = src[x * 4u + 0u];
-                g = src[x * 4u + 1u];
-                b = src[x * 4u + 2u];
-            } else {
-                r = HalfToByte(u16(src[x * 8u + 0u]) | (u16(src[x * 8u + 1u]) << 8));
-                g = HalfToByte(u16(src[x * 8u + 2u]) | (u16(src[x * 8u + 3u]) << 8));
-                b = HalfToByte(u16(src[x * 8u + 4u]) | (u16(src[x * 8u + 5u]) << 8));
-            }
-            dst[x * 3u + 0u] = b;
-            dst[x * 3u + 1u] = g;
-            dst[x * 3u + 2u] = r;
-        }
-    }
-    std::ofstream out{path, std::ios::binary};
-    out.write(reinterpret_cast<const char*>(file.data()), std::streamsize(file.size()));
-}
-} // namespace
-
-void TextureCache::DumpTargetToBmp(ImageId image_id, const std::string& path, u32 max_width) {
-    Image& image = slot_images[image_id];
-    if (!image.GetImage()) {
-        return;
-    }
-    const u32 bytes_per_pixel = image.info.num_bits / 8u;
-    if (bytes_per_pixel != 4u && bytes_per_pixel != 8u) {
-        return;
-    }
-    const u32 height = image.info.size.height;
-    u32 width = std::min(image.info.size.width, max_width);
-    // The utility download buffer is 32MB, so keep the copy under it.
-    constexpr u64 Cap = 24_MB;
-    if (u64(width) * height * bytes_per_pixel > Cap) {
-        width = u32(Cap / (u64(height) * bytes_per_pixel));
-    }
-    if (width == 0u) {
-        return;
-    }
-    const u64 size = u64(width) * height * bytes_per_pixel;
-    auto& download_buffer = buffer_cache.GetUtilityBuffer(MemoryUsage::Download);
-    const auto [download, offset] = download_buffer.Map(size);
-    download_buffer.Commit();
-    const vk::BufferImageCopy region = {
-        .bufferOffset = offset,
-        .bufferRowLength = width,
-        .bufferImageHeight = height,
-        .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor,
-                             .mipLevel = 0,
-                             .baseArrayLayer = 0,
-                             .layerCount = 1},
-        .imageOffset = {0, 0, 0},
-        .imageExtent = {width, height, 1},
-    };
-    scheduler.EndRendering();
-    const auto cmdbuf = scheduler.CommandBuffer();
-    image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
-    cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
-                             download_buffer.Handle(), region);
-    scheduler.Finish();
-    WriteBmp(path, download, width, height, bytes_per_pixel);
 }
 
 void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
