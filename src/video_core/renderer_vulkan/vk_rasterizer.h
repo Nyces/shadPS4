@@ -110,6 +110,8 @@ private:
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
 
+    void DumpRecordedTargets();
+
     void ResetBindings() {
         for (auto& image_id : bound_images) {
             texture_cache.GetImage(image_id).binding = {};
@@ -189,6 +191,10 @@ private:
     // describe the original size, so the sampling path has to look the image up at the
     // enlarged extent instead, or it would resolve a second image over the same memory.
     std::unordered_map<VAddr, std::pair<u32, u32>> upscaled_targets;
+    // Diagnostic: color targets 1080p or larger seen in the current frame, keyed by guest
+    // address, so a snapshot of them can be written to disk for inspection.
+    std::unordered_map<VAddr, VideoCore::ImageId> dump_targets;
+    u32 dump_pass_counter{};
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};

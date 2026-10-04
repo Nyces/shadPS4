@@ -3,6 +3,7 @@
 
 #include <bit>
 #include <cmath>
+#include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -253,6 +254,27 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     desc.info.size.height = vo_ext.height;
 }
 
+void Rasterizer::DumpRecordedTargets() {
+    std::error_code ec;
+    const std::filesystem::path dir = std::filesystem::current_path(ec) / "shadPS4_dump";
+    std::filesystem::create_directories(dir, ec);
+    for (const auto& [address, image_id] : dump_targets) {
+        if (!image_id) {
+            continue;
+        }
+        auto& image = texture_cache.GetImage(image_id);
+        if (image.info.size.width < 1920u) {
+            continue;
+        }
+        const auto path = dir / fmt::format("dump_{:#x}_{}x{}.bmp", address, image.info.size.width,
+                                            image.info.size.height);
+        texture_cache.DumpTargetToBmp(image_id, path.string(), image.info.size.width);
+        LOG_INFO(Render_Vulkan, "Offscreen dump: {} ({})", path.string(),
+                 vk::to_string(image.info.pixel_format));
+    }
+    dump_targets.clear();
+}
+
 void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     // Prefetch render targets to handle overlaps with bound textures (e.g. mipgen)
     const auto& key = pipeline->GetGraphicsKey();
@@ -331,6 +353,9 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+        if (image.info.size.width >= 1920u) {
+            dump_targets[col_buf.Address()] = image_id;
+        }
 
         {
             // Report every distinct render target with the register state it was derived
@@ -375,6 +400,12 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             const u32 scsr_w = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x);
             const u32 scsr_h = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y);
             vo_pass = true;
+            // Snapshot the frame's large color targets periodically. The output pass is the
+            // last one in a frame, so the scene, the effect buffers and the composition are all
+            // rendered by now and can be copied out for inspection.
+            if (++dump_pass_counter >= 900u && dump_pass_counter % 300u == 0u) {
+                DumpRecordedTargets();
+            }
             // Align every pass that renders into this surface to its full extent so
             // all of them share one depth attachment of a matching size, regardless
             // of whether the pass itself needs adjusting.
