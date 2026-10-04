@@ -687,66 +687,6 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         }
     }
 
-    // A sample can resolve to an image smaller than the one the passes rendered into at the
-    // same address: the render was enlarged by the presentation scale while the lookup, which
-    // does not go through the upscale tracking, keeps the guest extent. That leaves two images
-    // over one allocation and the sample keeps reading the one nothing wrote, so under
-    // upscaling the content the render produced never reaches the screen. Prefer the enlarged,
-    // GPU-rendered image over the smaller allocation at the same address.
-    if (desc.type == BindingType::Texture) {
-        ImageId enlarged_id{};
-        u32 enlarged_width = info.size.width;
-        for (const auto& cache_id : image_ids) {
-            auto& cache_image = slot_images[cache_id];
-            if (cache_image.info.guest_address != info.guest_address ||
-                cache_image.info.guest_size != info.guest_size) {
-                continue;
-            }
-            {
-                // Report every image that shares this allocation, so it is visible whether the
-                // enlarged render target is among the candidates and what state it is in when
-                // the sample over the same address does not pick it up.
-                static std::unordered_set<u64> cand_reports;
-                const u64 cand_key = (u64(info.guest_address) << 16) ^
-                                     (u64(cache_image.info.size.width) << 8) ^
-                                     u64(static_cast<u32>(cache_image.info.pixel_format));
-                if (cand_reports.insert(cand_key).second) {
-                    LOG_INFO(Render_Vulkan,
-                             "Sample candidate: addr={:#x}, declared={}x{}, candidate={}x{}, "
-                             "fmt={}, gpuModified={}, gpuDirty={}, isTarget={}",
-                             info.guest_address, info.size.width, info.size.height,
-                             cache_image.info.size.width, cache_image.info.size.height,
-                             vk::to_string(cache_image.info.pixel_format),
-                             True(cache_image.flags & ImageFlagBits::GpuModified),
-                             True(cache_image.flags & ImageFlagBits::GpuDirty),
-                             static_cast<u32>(cache_image.binding.is_target));
-                }
-            }
-            if (cache_image.info.size.width < info.size.width ||
-                cache_image.info.size.height < info.size.height) {
-                continue;
-            }
-            if (cache_image.info.size.width == info.size.width &&
-                cache_image.info.size.height == info.size.height) {
-                continue;
-            }
-            if (!IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format) ||
-                (cache_image.info.type != info.type && info.size != Extent3D{1, 1, 1})) {
-                continue;
-            }
-            if (False(cache_image.flags & ImageFlagBits::GpuModified)) {
-                continue;
-            }
-            if (cache_image.info.size.width > enlarged_width) {
-                enlarged_width = cache_image.info.size.width;
-                enlarged_id = cache_id;
-            }
-        }
-        if (enlarged_id) {
-            image_id = enlarged_id;
-        }
-    }
-
     // Create and register a new image
     if (!image_id) {
         image_id = slot_images.insert(instance, scheduler, blit_helper, slot_image_views, info);
