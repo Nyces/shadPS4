@@ -545,16 +545,22 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     // selecting a different program for it. Both runs share the game's program hashes,
     // so a differing pair here is exactly a permutation difference, reported once each.
     {
-        const Shader::Info& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
-        const Shader::Info& fs_info = pipeline->GetStage(Shader::LogicalStage::Fragment);
+        // A depth-only pass has no fragment stage, so read the array directly instead of
+        // GetStage, which dereferences the slot unconditionally.
+        const auto stages = pipeline->GetStages();
+        const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
+            const u32 index = u32(s);
+            return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
+        };
+        const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
+        const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
         static std::unordered_set<u64> logged_shaders;
         const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
-                        (u64(vs_info.pgm_hash) << 20) ^ u64(fs_info.pgm_hash);
+                        (vs_hash << 20) ^ fs_hash;
         if (logged_shaders.insert(key).second) {
             LOG_INFO(Render_Vulkan, "Pass shaders: cb0={:#x}, prim={}, vs={:#x}, fs={:#x}",
                      liverpool->regs.color_buffers[0].Address(),
-                     static_cast<u32>(liverpool->regs.primitive_type), vs_info.pgm_hash,
-                     fs_info.pgm_hash);
+                     static_cast<u32>(liverpool->regs.primitive_type), vs_hash, fs_hash);
         }
     }
 
