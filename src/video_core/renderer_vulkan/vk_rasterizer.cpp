@@ -1858,11 +1858,23 @@ void Rasterizer::UpdateViewportScissorState() const {
                     scsr_w > 0.0f && viewport.width >= scsr_w * rt_fit_x * 0.999f;
                 const bool converted_y =
                     scsr_h > 0.0f && std::abs(viewport.height) >= scsr_h * rt_fit_y * 0.999f;
-                if (!converted_x) {
+                // A pass whose viewport is already laid out for the enlarged surface does not
+                // match the window times the ratio: it reads as a fraction of the surface (the
+                // 0.8-wide viewport the composition layers use). The coverage test above cannot
+                // tell it apart from an unconverted axis, and taking the ratio would stretch the
+                // layer past the target and slide most of it off the screen, which is what left
+                // the stage wash and the glow sticks out of the frame. An axis whose ratio
+                // overshoots the target extent is such an already-converted viewport.
+                const bool overshoots_x = rt_fit_width > 0 && std::abs(viewport.width) * rt_fit_x >
+                                                                  float(rt_fit_width) * 1.001f;
+                const bool overshoots_y =
+                    rt_fit_height > 0 &&
+                    std::abs(viewport.height) * rt_fit_y > float(rt_fit_height) * 1.001f;
+                if (!converted_x && !overshoots_x) {
                     viewport.x *= rt_fit_x;
                     viewport.width *= rt_fit_x;
                 }
-                if (!converted_y) {
+                if (!converted_y && !overshoots_y) {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
                 }
