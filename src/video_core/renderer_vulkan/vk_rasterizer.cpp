@@ -230,7 +230,16 @@ float Rasterizer::PresentationScale() const {
     return fit_x;
 }
 
+// Bounded diagnostic switch. When false the offscreen targets keep the extent the game gave
+// them and only the output surface is scaled, so the frame is composed from the same buffers
+// the native run uses. That separates a fault that lives in the enlargement from one that
+// exists regardless of it.
+static constexpr bool kUpscaleOffscreenTargets = false;
+
 void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const {
+    if (!kUpscaleOffscreenTargets) {
+        return;
+    }
     const float fit = PresentationScale();
     if (fit <= 1.001f) {
         return;
