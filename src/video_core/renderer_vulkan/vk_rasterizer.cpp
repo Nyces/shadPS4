@@ -251,6 +251,13 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     if (liverpool->FindVideoOutSurface(desc.info.guest_address)) {
         return;
     }
+    // TEMPORARY PROBE: the glow-stick target is a 3D effect surface the game also lays out at
+    // the presentation scale, and the composition samples the same address as a window-sized
+    // image of another format. Keep it at the game's own size so we can tell whether enlarging
+    // it is what takes the background and the glow sticks out of the frame.
+    if (desc.info.guest_address == 0x20f0c0000ull) {
+        return;
+    }
     // TEMPORARY DIAGNOSTIC: report the decision for every distinct offscreen target so the
     // ones still sitting at the game's window size can be told from the ones this rule never
     // reaches. The 2D composition surface (the one the post-process passes write) is the
