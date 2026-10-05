@@ -538,6 +538,33 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         image_id = cache_id;
     }
 
+    // TEMPORARY DIAGNOSTIC: for the presentation-scale targets, list every image the cache holds
+    // at the address next to what this lookup asked for. A second image over one allocation, or
+    // an eviction a sibling target relies on, is what would explain a scene that goes black once
+    // the composition target is enlarged, and neither is visible from the render side.
+    if (info.guest_address == 0x20acc0000ull || info.guest_address == 0x209340000ull ||
+        info.guest_address == 0x207140000ull || info.guest_address == 0x208240000ull ||
+        info.guest_address == 0x20f0c0000ull || info.guest_address == 0x216bc0000ull) {
+        static std::unordered_set<u64> seen_addrs;
+        const u64 key =
+            (u64(info.guest_address) << 24) ^ (u64(info.size.width) << 8) ^ u64(info.size.height);
+        if (seen_addrs.insert(key).second) {
+            std::string list;
+            for (const auto& cache_id : image_ids) {
+                const auto& ci = slot_images[cache_id];
+                if (ci.info.guest_address != info.guest_address) {
+                    continue;
+                }
+                list += fmt::format(" [{}x{} fmt={} gs={:#x} smp={}]", ci.info.size.width,
+                                    ci.info.size.height, static_cast<int>(ci.info.pixel_format),
+                                    ci.info.guest_size, ci.info.num_samples);
+            }
+            LOG_INFO(Render_Vulkan, "Cache ask: addr={:#x} {}x{} gs={:#x} matched={} ->{}",
+                     info.guest_address, info.size.width, info.size.height, info.guest_size,
+                     static_cast<bool>(image_id), list);
+        }
+    }
+
     // A depth buffer the game samples as a colour texture can still be declared at the game's
     // window while the presentation scale rendered the scene depth larger. Both descriptors
     // name one allocation, and the smaller view of it is never written because the scene
