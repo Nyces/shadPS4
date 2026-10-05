@@ -310,13 +310,29 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     // the post-process chain downstream of the scene: the 4K scene reaches it as input, so
     // its own target belongs on the same scale or the stage would resolve the 4K scene into
     // a window-sized image that the next stage has to stretch again, which is what left the
-    // composition and the final present at the game's window. Its geometry still follows:
-    // the clip-disabled blits get their quad scaled through the target ratio, and the passes
-    // the resolution patch converted already describe the enlarged surface themselves.
-    if (samples_upscaled) {
+    // composition and the final present at the game's window. Only the clip-disabled blits
+    // are lifted: they are the full-screen composition stages, and the target ratio scales
+    // their quad to the enlarged extent. A clip-enabled pass with its own geometry can be a
+    // layer laid out for the original window even when it reads the scene, and enlarging it
+    // moves that content out of frame, so those keep the size the game chose.
+    if (samples_upscaled && liverpool->regs.IsClipDisabled()) {
+        static std::unordered_set<u64> grown_by_sampling;
+        if (grown_by_sampling.insert(u64(desc.info.guest_address)).second) {
+            LOG_INFO(Render_Vulkan, "Grow by sampling: addr={:#x} desc={}x{} clipDisabled=true",
+                     desc.info.guest_address, desc.info.size.width, desc.info.size.height);
+        }
         desc.info.size.width = vo_ext.width;
         desc.info.size.height = vo_ext.height;
         return;
+    }
+    // Report a stage this rule deliberately leaves at the window size, so the chain it lifts
+    // can be told apart from the passes that have to keep the game's layout.
+    if (samples_upscaled && !liverpool->regs.IsClipDisabled()) {
+        static std::unordered_set<u64> kept_by_clip;
+        if (kept_by_clip.insert(u64(desc.info.guest_address)).second) {
+            LOG_INFO(Render_Vulkan, "Keep by clip: addr={:#x} desc={}x{} clipDisabled=false",
+                     desc.info.guest_address, desc.info.size.width, desc.info.size.height);
+        }
     }
     // The remaining window-sized clip-enabled targets divide into two kinds. The resolution
     // patch converted the scene, so those passes describe the enlarged surface in their
