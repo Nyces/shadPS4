@@ -545,10 +545,9 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     if (info.guest_address == 0x20acc0000ull || info.guest_address == 0x209340000ull ||
         info.guest_address == 0x207140000ull || info.guest_address == 0x208240000ull ||
         info.guest_address == 0x20f0c0000ull || info.guest_address == 0x216bc0000ull) {
-        static std::unordered_set<u64> seen_addrs;
-        const u64 key =
-            (u64(info.guest_address) << 24) ^ (u64(info.size.width) << 8) ^ u64(info.size.height);
-        if (seen_addrs.insert(key).second) {
+        static std::unordered_map<u64, u32> hits;
+        const u32 count = ++hits[u64(info.guest_address)];
+        if (count % 4000 == 1) {
             std::string list;
             for (const auto& cache_id : image_ids) {
                 const auto& ci = slot_images[cache_id];
@@ -559,9 +558,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
                                     ci.info.size.height, static_cast<int>(ci.info.pixel_format),
                                     ci.info.guest_size, ci.info.num_samples);
             }
-            LOG_INFO(Render_Vulkan, "Cache ask: addr={:#x} {}x{} gs={:#x} matched={} ->{}",
-                     info.guest_address, info.size.width, info.size.height, info.guest_size,
-                     static_cast<bool>(image_id), list);
+            LOG_INFO(Render_Vulkan, "Cache stay: #{} addr={:#x} ask={}x{} ->{}", count,
+                     info.guest_address, info.size.width, info.size.height, list);
         }
     }
 
