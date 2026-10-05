@@ -563,22 +563,29 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         }
     }
 
-    // A depth buffer the game samples as a colour texture can still be declared at the game's
-    // window while the presentation scale rendered the scene depth larger. Both descriptors
-    // name one allocation, and the smaller view of it is never written because the scene
-    // renders its depth into the larger one, so sampling the small view reads an empty buffer.
-    // Prefer the depth image that was actually rendered and read it at its own extent.
-    if (desc.type == BindingType::Texture) {
-        ImageId rendered_depth_id{};
+    // A target the presentation scale rendered larger leaves a second, window-sized image over
+    // the same allocation: the first pass to describe the address at the game's window created
+    // it, and the enlarged render goes into the image the descriptor was scaled to. Reading or
+    // writing the small view then touches a buffer nothing else uses, which is what takes the
+    // background and the glow out of the frame once the composition joins the scale. Prefer the
+    // larger image whenever it shares the allocation, the guest size and the format, whatever
+    // the binding is and whether it is a depth surface or a colour one.
+    {
+        ImageId enlarged_id{};
         for (const auto& cache_id : image_ids) {
             const auto& cache_image = slot_images[cache_id];
-            if (cache_image.info.guest_address == info.guest_address &&
-                cache_image.info.props.is_depth && cache_image.info.size.width > info.size.width) {
-                rendered_depth_id = cache_id;
+            if (cache_image.info.guest_address != info.guest_address ||
+                cache_image.info.guest_size != info.guest_size ||
+                cache_image.info.size.width <= info.size.width) {
+                continue;
+            }
+            if (cache_image.info.props.is_depth ||
+                IsVulkanFormatCompatible(cache_image.info.pixel_format, info.pixel_format)) {
+                enlarged_id = cache_id;
             }
         }
-        if (rendered_depth_id) {
-            image_id = rendered_depth_id;
+        if (enlarged_id) {
+            image_id = enlarged_id;
         }
     }
 
