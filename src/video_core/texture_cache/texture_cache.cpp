@@ -281,6 +281,17 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
+        // One allocation, one image. A target that the presentation scale enlarged and the
+        // sampler over the same allocation reach here with different extents and, when a
+        // depth buffer is read as a colour texture, different block sizes too. Inserting a
+        // second image over the memory the first one owns is what makes the consumer sample
+        // the copy nothing wrote, so keep the image already covering the allocation and let
+        // the caller build the view it needs instead of creating a competing image.
+        if (binding == BindingType::Texture &&
+            image_info.guest_size == cache_image.info.guest_size &&
+            image_info.size != cache_image.info.size) {
+            return {cache_image_id, -1, -1};
+        }
         const u32 lhs_block_size = image_info.num_bits * image_info.num_samples;
         const u32 rhs_block_size = cache_image.info.num_bits * cache_image.info.num_samples;
         if (image_info.BlockDim() != cache_image.info.BlockDim() ||
