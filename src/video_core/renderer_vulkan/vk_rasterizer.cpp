@@ -465,6 +465,25 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 upscaled_targets[desc.info.guest_address] = {desc.info.size.width,
                                                              desc.info.size.height};
             }
+            // TEMPORARY DIAGNOSTIC: a target an earlier pass already enlarged has to be written at
+            // that size, yet this pass left its descriptor at the game's window. Its geometry is
+            // then never scaled, so whatever it draws lands in the corner of the enlarged
+            // surface. Report which shader does that so it can be told from the converted ones.
+            if (upscaled_targets.contains(desc.info.guest_address) &&
+                desc.info.size.width == guest_window_width) {
+                static std::unordered_set<u64> logged_unscaled_writer;
+                const u64 vs_hash = pipeline->GetStage(LogicalStage::Vertex).pgm_hash;
+                const u64 fs_hash = pipeline->GetStage(LogicalStage::Fragment).pgm_hash;
+                const u64 writer_key =
+                    (u64(desc.info.guest_address) << 32) ^ (vs_hash << 8) ^ fs_hash;
+                if (logged_unscaled_writer.insert(writer_key).second) {
+                    LOG_INFO(Render_Vulkan,
+                             "Unscaled writer: addr={:#x} clipDisabled={} vs={:#x} fs={:#x} "
+                             "samplesUpscaled={} inPlace={}",
+                             desc.info.guest_address, liverpool->regs.IsClipDisabled(), vs_hash,
+                             fs_hash, samples_upscaled, in_place_blit);
+                }
+            }
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
