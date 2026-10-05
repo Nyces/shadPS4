@@ -244,7 +244,7 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
         return;
     }
     const auto vo_ext = liverpool->GetVideoOutExtent();
-    if (!vo_ext.Valid() || desc.info.size.width == 0 || desc.info.size.height == 0) {
+    if (!vo_ext.Valid()) {
         return;
     }
     if (liverpool->FindVideoOutSurface(desc.info.guest_address)) {
@@ -272,22 +272,29 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
                      liverpool->regs.viewports[0].xscale, liverpool->regs.viewports[0].yscale);
         }
     }
+    // A target that has already been rendered at the presentation scale keeps that extent for
+    // every later pass that addresses it, whatever size its own registers describe. A pass whose
+    // color binding is disabled comes back with an empty descriptor, and the background layers
+    // are clip disabled and still address the game's window, yet they share the scene surface.
+    // The chain only stays coherent if every writer and reader agrees on one extent: following
+    // the recorded extent is what keeps them on the enlarged image instead of a second image
+    // over the same memory that nothing else touches. Look the target up by address before its
+    // size is consulted, so a target one pass enlarged is never re-described at the window size
+    // by another.
+    if (const auto up = upscaled_targets.find(desc.info.guest_address);
+        up != upscaled_targets.end()) {
+        desc.info.size.width = up->second.first;
+        desc.info.size.height = up->second.second;
+        return;
+    }
+    if (desc.info.size.width == 0 || desc.info.size.height == 0) {
+        return;
+    }
     // Only the targets the game sized for exactly that window are missing the scale.
     // A target it allocated at some other size is a deliberate choice, and the passes
     // reading it scale their coordinates themselves.
     if (desc.info.size.width != guest_window_width ||
         desc.info.size.height != guest_window_height) {
-        return;
-    }
-    // A target already rendered at the presentation scale keeps that extent for every later
-    // pass drawing into it, including the passes that would not qualify on their own. The
-    // background layers are clip disabled and still address the game's window, yet they share
-    // the scene surface, so following the recorded extent is the only way they land on the
-    // enlarged image instead of the smaller one next to it.
-    if (const auto up = upscaled_targets.find(desc.info.guest_address);
-        up != upscaled_targets.end()) {
-        desc.info.size.width = up->second.first;
-        desc.info.size.height = up->second.second;
         return;
     }
     // A clip-disabled pass does not drive the Vulkan viewport from the viewport registers:
