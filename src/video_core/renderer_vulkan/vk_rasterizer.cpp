@@ -397,6 +397,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         const auto& col_buf = regs.color_buffers[cb];
+        // Record an in-place blit before the binding filter: a target a pass reads while it
+        // renders into it must never be enlarged, whatever state filters this pass out.
+        if (col_buf && SamplesAddress(pipeline, col_buf.Address())) {
+            in_place_targets.insert(col_buf.Address());
+        }
         const u32 target_mask = regs.color_target_mask.GetMask(cb);
         if (skip_cb_binding || !col_buf || !target_mask || (key.mrt_mask & (1 << cb)) == 0) {
             image_id = {};
@@ -415,20 +420,13 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // guest never wrote and the detiler would unpack garbage. Uploads clamp their
         // copy extent to the guest pitch, so leaving them alone is safe.
         //
-        // A clip-disabled pass that samples the very allocation it draws into is an
-        // in-place blit. Those are harmless while the source and the destination are the
-        // same size, because the mapping is the identity, but enlarging the target turns
-        // it into a scaling blit that reads pixels it has already written, so the result
-        // collapses to black. Leave such targets at the size the game chose.
-        const bool samples_own_target = SamplesAddress(pipeline, col_buf.Address());
-        if (samples_own_target) {
-            // A pass that samples the allocation it draws into makes it an in-place blit.
-            // Remember the address: enlarging such a target turns the identity copy into a
-            // scaling copy that reads the pixels it just wrote and collapses to black, so it
-            // stays at the size the game chose whatever clip state this or a later pass uses.
-            in_place_targets.insert(col_buf.Address());
-        }
-        const bool in_place_blit = regs.IsClipDisabled() && samples_own_target;
+        // A pass that samples the very allocation it draws into is an in-place blit. Those are
+        // harmless while the source and the destination are the same size, because the mapping
+        // is the identity, but enlarging the target turns it into a scaling blit that reads
+        // pixels it has already written, so the result collapses to black. The clip state does
+        // not matter: a clip-enabled blur reads its own target exactly like a clip-disabled
+        // blit does, so leave such targets at the size the game chose either way.
+        const bool in_place_blit = SamplesAddress(pipeline, col_buf.Address());
         {
             const u32 sharp_width = desc.info.size.width;
             const u32 sharp_height = desc.info.size.height;
