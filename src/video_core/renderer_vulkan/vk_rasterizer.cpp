@@ -297,29 +297,6 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
         desc.info.size.height != guest_window_height) {
         return;
     }
-    // A clip-disabled pass does not drive the Vulkan viewport from the viewport registers:
-    // the emulator pins it to the hardware window and builds the quad inside the shader from
-    // the push data (see ConvertPositionToClipSpace), so those registers say nothing about
-    // the extent the pass actually covers. The scissor is the authoritative extent there, and
-    // a scissor spanning the game's window is the signature of the 2D composition chain, which
-    // blits the whole frame. Enlarge such a pass as well so the composition joins the scene at
-    // the presentation scale; its push data and scissor are scaled with the target in
-    // UpdateViewportScissorState, which keeps the quad on the enlarged surface instead of the
-    // window-sized corner it would otherwise land in.
-    if (liverpool->regs.IsClipDisabled()) {
-        const u32 scsr_w = AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x);
-        const u32 scsr_h = AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y);
-        if (scsr_w < guest_window_width || scsr_h < guest_window_height) {
-            return;
-        }
-        LOG_INFO(Render_Vulkan,
-                 "ApplyScale clip-disabled: addr={:#x} scissor={}x{} window={}x{} -> {}x{}",
-                 desc.info.guest_address, scsr_w, scsr_h, guest_window_width, guest_window_height,
-                 vo_ext.width, vo_ext.height);
-        desc.info.size.width = vo_ext.width;
-        desc.info.size.height = vo_ext.height;
-        return;
-    }
     // The remaining window-sized clip-enabled targets divide into two kinds. The resolution
     // patch converted the scene, so those passes describe the enlarged surface in their
     // viewport registers: a viewport that already reaches the whole presentation-scaled
