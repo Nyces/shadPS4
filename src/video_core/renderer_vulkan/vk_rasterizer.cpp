@@ -233,7 +233,12 @@ float Rasterizer::PresentationScale() const {
 // Only the offscreen targets the resolution patch actually converted are rendered at the
 // presentation scale. Every other surface the game sized for its own window is still laid out
 // for that window, so growing it crops its contents into a corner.
-static constexpr bool kUpscaleOffscreenTargets = true;
+//
+// Turned off for the RenderDoc capture of the correct-background frame: with the enlargement
+// disabled the offscreen targets keep the extent the game gave them, so the frame the capture
+// holds is the one the native run composes, and the scene surface can be compared against the
+// enlarged one without any upscaling in the way.
+static constexpr bool kUpscaleOffscreenTargets = false;
 
 void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const {
     if (!kUpscaleOffscreenTargets) {
