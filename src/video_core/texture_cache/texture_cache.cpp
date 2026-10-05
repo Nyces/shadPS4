@@ -281,17 +281,6 @@ std::tuple<ImageId, int, int> TextureCache::ResolveOverlap(const ImageInfo& imag
 
     // Equal address
     if (image_info.guest_address == cache_image.info.guest_address) {
-        // One allocation, one image. A target that the presentation scale enlarged and the
-        // sampler over the same allocation reach here with different extents and, when a
-        // depth buffer is read as a colour texture, different block sizes too. Inserting a
-        // second image over the memory the first one owns is what makes the consumer sample
-        // the copy nothing wrote, so keep the image already covering the allocation and let
-        // the caller build the view it needs instead of creating a competing image.
-        if (binding == BindingType::Texture &&
-            image_info.guest_size == cache_image.info.guest_size &&
-            image_info.size != cache_image.info.size) {
-            return {cache_image_id, -1, -1};
-        }
         const u32 lhs_block_size = image_info.num_bits * image_info.num_samples;
         const u32 rhs_block_size = cache_image.info.num_bits * cache_image.info.num_samples;
         if (image_info.BlockDim() != cache_image.info.BlockDim() ||
@@ -547,6 +536,25 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             continue;
         }
         image_id = cache_id;
+    }
+
+    // A depth buffer the game samples as a colour texture can still be declared at the game's
+    // window while the presentation scale rendered the scene depth larger. Both descriptors
+    // name one allocation, and the smaller view of it is never written because the scene
+    // renders its depth into the larger one, so sampling the small view reads an empty buffer.
+    // Prefer the depth image that was actually rendered and read it at its own extent.
+    if (desc.type == BindingType::Texture) {
+        ImageId rendered_depth_id{};
+        for (const auto& cache_id : image_ids) {
+            const auto& cache_image = slot_images[cache_id];
+            if (cache_image.info.guest_address == info.guest_address &&
+                cache_image.info.props.is_depth && cache_image.info.size.width > info.size.width) {
+                rendered_depth_id = cache_id;
+            }
+        }
+        if (rendered_depth_id) {
+            image_id = rendered_depth_id;
+        }
     }
 
     // Try to resolve overlaps (if any)
