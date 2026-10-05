@@ -334,6 +334,17 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
                      desc.info.guest_address, desc.info.size.width, desc.info.size.height);
         }
     }
+    // A clip-disabled pass is a full-screen blit: its coverage lives in the push constants, not
+    // in the viewport registers, so no viewport can say whether it reaches the enlarged surface.
+    // The target ratio scales exactly that quad, so such a pass joins the scale as soon as its
+    // target does; leaving it out keeps its target at the window size while the converted passes
+    // write the enlarged one, which splits one allocation over two images and leaves the work
+    // this pass did only in the corner of the enlarged surface.
+    if (liverpool->regs.IsClipDisabled()) {
+        desc.info.size.width = vo_ext.width;
+        desc.info.size.height = vo_ext.height;
+        return;
+    }
     // The remaining window-sized clip-enabled targets divide into two kinds. The resolution
     // patch converted the scene, so those passes describe the enlarged surface in their
     // viewport registers: a viewport that already reaches the whole presentation-scaled
