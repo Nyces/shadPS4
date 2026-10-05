@@ -730,10 +730,13 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
                           mrt0_range);
         Transit(vk::ImageLayout::eColorAttachmentOptimal,
                 vk::AccessFlagBits2::eColorAttachmentWrite, mrt1_range);
-        blit_helper->CopyBetweenMsImages(info.size.width, info.size.height,
-                                         src_image.info.num_samples, src_image.info.pixel_format,
-                                         src_image.backing->num_samples > 1, src_image.GetImage(),
-                                         GetImage());
+        // The sample count in the key is the destination's: the pipeline always rasterizes into
+        // the single-sampled surface, while the source is only sampled. Passing the source's
+        // count here made the pipeline claim four samples for a one-sample attachment, which the
+        // device rejects outright.
+        blit_helper->CopyBetweenMsImages(
+            info.size.width, info.size.height, backing->num_samples, src_image.info.pixel_format,
+            src_image.backing->num_samples > 1, src_image.GetImage(), GetImage());
         flags |= VideoCore::ImageFlagBits::GpuModified;
         flags &= ~VideoCore::ImageFlagBits::Dirty;
         return;
