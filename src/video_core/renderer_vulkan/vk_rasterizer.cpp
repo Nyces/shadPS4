@@ -233,12 +233,7 @@ float Rasterizer::PresentationScale() const {
 // Only the offscreen targets the resolution patch actually converted are rendered at the
 // presentation scale. Every other surface the game sized for its own window is still laid out
 // for that window, so growing it crops its contents into a corner.
-//
-// Turned off for the RenderDoc capture of the correct-background frame: with the enlargement
-// disabled the offscreen targets keep the extent the game gave them, so the frame the capture
-// holds is the one the native run composes, and the scene surface can be compared against the
-// enlarged one without any upscaling in the way.
-static constexpr bool kUpscaleOffscreenTargets = false;
+static constexpr bool kUpscaleOffscreenTargets = true;
 
 void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const {
     if (!kUpscaleOffscreenTargets) {
@@ -254,6 +249,24 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     }
     if (liverpool->FindVideoOutSurface(desc.info.guest_address)) {
         return;
+    }
+    // TEMPORARY DIAGNOSTIC: report the decision for every distinct offscreen target so the
+    // ones still sitting at the game's window size can be told from the ones this rule never
+    // reaches. The 2D composition surface (the one the post-process passes write) is the
+    // target of interest: it is 1920x1080 like the scene, so it either gets enlarged here or
+    // something upstream keeps its descriptor from matching the recorded window.
+    {
+        static std::unordered_set<u64> diag_seen;
+        if (diag_seen.insert(u64(desc.info.guest_address)).second) {
+            const bool matches = desc.info.size.width == guest_window_width &&
+                                 desc.info.size.height == guest_window_height;
+            LOG_INFO(Render_Vulkan,
+                     "ApplyScale: addr={:#x} desc={}x{} guestWindow={}x{} fit={} voExt={}x{} "
+                     "isVideoOut={} matches={}",
+                     desc.info.guest_address, desc.info.size.width, desc.info.size.height,
+                     guest_window_width, guest_window_height, fit, vo_ext.width, vo_ext.height,
+                     liverpool->FindVideoOutSurface(desc.info.guest_address) != nullptr, matches);
+        }
     }
     // Only the targets the game sized for exactly that window are missing the scale.
     // A target it allocated at some other size is a deliberate choice, and the passes
