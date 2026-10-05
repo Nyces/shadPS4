@@ -1371,21 +1371,30 @@ void Rasterizer::UpdateViewportScissorState() const {
         const u32 resolution_scale = VideoCore::GetResolutionScale();
         const f32 resolution_scale_f = static_cast<f32>(resolution_scale);
 
-        // Scale the viewport only when the pass actually renders into a surface whose host extent
-        // we enlarged. Surfaces that are already guest sized at 4K (for example the display buffer
-        // raised by the patch) must not be magnified a second time, otherwise the content overflows
-        // the screen. Checking the bound targets is exact, unlike the previous viewport and scissor
-        // heuristics which missed clip disabled passes.
+        // A pass needs its viewport scaled when it renders into a surface whose host extent we
+        // enlarged, or when the guest allocated the target from the raised 4K screen size while
+        // still laying the pass out in its native 1920x1080 space. Surfaces that are already guest
+        // sized at 4K and also drawn with 4K viewports (for example the display buffer raised by
+        // the patch) are left alone, otherwise the content overflows the screen.
         bool guest_hd_space = false;
+        u32 target_width = 0;
         for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
-            if (cb_descs[cb].first &&
-                VideoCore::IsScaledRange(cb_descs[cb].second.info.guest_address)) {
-                guest_hd_space = true;
-                break;
+            if (!cb_descs[cb].first) {
+                continue;
             }
+            const auto& info = cb_descs[cb].second.info;
+            if (VideoCore::IsScaledRange(info.guest_address)) {
+                guest_hd_space = true;
+            }
+            target_width = std::max(target_width, info.size.width);
         }
-        if (!guest_hd_space && db_desc.first) {
-            guest_hd_space = VideoCore::IsScaledRange(db_desc.second.info.guest_address);
+        if (!guest_hd_space && db_desc.first &&
+            VideoCore::IsScaledRange(db_desc.second.info.guest_address)) {
+            guest_hd_space = true;
+        }
+        if (!guest_hd_space && !regs.IsClipDisabled() && target_width >= 3840 &&
+            vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f) {
+            guest_hd_space = true;
         }
         const f32 scale_f = guest_hd_space ? resolution_scale_f : 1.0f;
         const u32 scale_u = guest_hd_space ? resolution_scale : 1u;
@@ -1398,7 +1407,7 @@ void Rasterizer::UpdateViewportScissorState() const {
             static std::unordered_set<std::string> diag_seen;
             std::scoped_lock lk{diag_mutex};
             if (diag_seen.size() < 200) {
-                u32 cbaddr = 0;
+                VAddr cbaddr = 0;
                 u32 cbw = 0;
                 u32 cbh = 0;
                 for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
