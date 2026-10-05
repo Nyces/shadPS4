@@ -719,26 +719,6 @@ void Image::Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_ra
     SetBackingSamples(1, false);
     scheduler->EndRendering();
 
-    // When the source was rendered at a different extent than the destination - the scene is
-    // rasterized at the presentation scale while its resolve target stays at the game's window -
-    // the plain copy below transfers only the overlapping top-left corner. Run the transfer
-    // through the blit helper instead, which samples the whole source into the destination, so
-    // the scene is scaled down rather than cropped.
-    if (src_image.info.size.width != info.size.width ||
-        src_image.info.size.height != info.size.height) {
-        src_image.Transit(vk::ImageLayout::eShaderReadOnlyOptimal, vk::AccessFlagBits2::eShaderRead,
-                          mrt0_range);
-        Transit(vk::ImageLayout::eColorAttachmentOptimal,
-                vk::AccessFlagBits2::eColorAttachmentWrite, mrt1_range);
-        blit_helper->CopyBetweenMsImages(info.size.width, info.size.height,
-                                         src_image.info.num_samples, src_image.info.pixel_format,
-                                         src_image.backing->num_samples > 1, src_image.GetImage(),
-                                         GetImage());
-        flags |= VideoCore::ImageFlagBits::GpuModified;
-        flags &= ~VideoCore::ImageFlagBits::Dirty;
-        return;
-    }
-
     src_image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
                       mrt0_range);
     Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, mrt1_range);

@@ -239,9 +239,6 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     if (!kUpscaleOffscreenTargets) {
         return;
     }
-    if (keep_at_window.contains(desc.info.guest_address)) {
-        return;
-    }
     const float fit = PresentationScale();
     if (fit <= 1.001f) {
         return;
@@ -1654,28 +1651,43 @@ void Rasterizer::Resolve() {
     VideoCore::TextureCache::ImageDesc mrt0_desc{liverpool->regs.color_buffers[0], mrt0_hint};
     VideoCore::TextureCache::ImageDesc mrt1_desc{liverpool->regs.color_buffers[1], mrt1_hint};
     // The resolve pass hands the multisampled scene to the single-sampled buffer the
-    // post-process chain reads. The render path rasterizes the scene at the presentation
-    // scale, so the source is looked up at that scale, but the destination keeps the size
-    // the game chose: the post-process chain was authored against the window-sized surface,
-    // and enlarging it is what cropped the layers still laid out for that window. The copy
-    // scales the scene down into the destination instead.
+    // post-process chain reads. The render path enlarges the offscreen targets to the
+    // presentation scale, so both sides of this transfer have to be looked up at that
+    // scale as well: rebuilding the descriptors from the registers alone describes them
+    // at the size the game chose, which would look up a second image over the same
+    // memory for the source and leave the destination at the original size, so the
+    // enlarged scene would be resolved into a quarter-sized buffer and everything
+    // downstream of it would read an image that was never written.
     const u32 mrt0_sharp_width = mrt0_desc.info.size.width;
+    const u32 mrt1_sharp_width = mrt1_desc.info.size.width;
     ApplyPresentationScale(mrt0_desc);
-    // Only the source is enlarged. The destination deliberately keeps the extent the game
-    // chose: the scene is rasterized at the presentation scale, but every post-process pass
-    // downstream was authored against the window-sized surface, so the copy scales the scene
-    // down into that surface instead of the whole chain being enlarged. Remember the address
-    // so the render path does not enlarge it on a later pass either, and drop any record an
-    // earlier build left behind.
-    if (mrt1_desc.info.size.width != 0 && mrt1_desc.info.size.height != 0) {
-        keep_at_window.insert(mrt1_desc.info.guest_address);
-        upscaled_targets.erase(mrt1_desc.info.guest_address);
+    ApplyPresentationScale(mrt1_desc);
+    // The resolve transfers one surface into another of the same shape, so the destination has
+    // to follow the extent the source ended up with. At resolve time the registers no longer
+    // describe the scene pass, so the destination cannot be recognised on its own and it stays
+    // at the window size the registers name. The destination then resolves to a second, smaller
+    // image over the same memory while the post-process passes downstream describe it at the
+    // enlarged extent and read the image that was never written, which is what left the
+    // background and the glow sticks out of the frame. Carry the source's extent over instead.
+    if (mrt0_desc.info.size.width > mrt1_desc.info.size.width &&
+        mrt1_desc.info.size.width == guest_window_width &&
+        mrt1_desc.info.size.height == guest_window_height) {
+        mrt1_desc.info.size.width = mrt0_desc.info.size.width;
+        mrt1_desc.info.size.height = mrt0_desc.info.size.height;
     }
-    // Record the source the way the render path records the targets it enlarges, so the
-    // sampling path looks the scene up at the extent it was actually rasterized at.
+    // Record both sides the way the render path records the targets it enlarges. The
+    // destination of a resolve never goes through the render path, so nothing else
+    // would ever record it, and the post-process passes reading it describe it at the
+    // size the game chose: without the record the sampling path leaves those lookups
+    // alone and they resolve to a second, never written image over the same memory,
+    // which is what kept the scene black even once the resolve itself was correct.
     if (mrt0_desc.info.size.width != mrt0_sharp_width) {
         upscaled_targets[mrt0_desc.info.guest_address] = {mrt0_desc.info.size.width,
                                                           mrt0_desc.info.size.height};
+    }
+    if (mrt1_desc.info.size.width != mrt1_sharp_width) {
+        upscaled_targets[mrt1_desc.info.guest_address] = {mrt1_desc.info.size.width,
+                                                          mrt1_desc.info.size.height};
     }
     auto& mrt0_image = texture_cache.GetImage(texture_cache.FindImage(mrt0_desc, true));
     auto& mrt1_image = texture_cache.GetImage(texture_cache.FindImage(mrt1_desc, true));
