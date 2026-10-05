@@ -190,6 +190,11 @@ private:
     // describe the original size, so the sampling path has to look the image up at the
     // enlarged extent instead, or it would resolve a second image over the same memory.
     std::unordered_map<VAddr, std::pair<u32, u32>> upscaled_targets;
+    // Every address a pass samples while it renders into it, i.e. an in-place blit. Enlarging
+    // one turns the identity copy into a scaling copy that reads the pixels it just wrote, so
+    // once an address is seen used this way it is never enlarged. Learned from the passes seen,
+    // so a target is protected from the frame after the in-place pass is first observed.
+    std::unordered_set<VAddr> in_place_targets;
     // Set while the current draw renders into a registered VideoOut surface, used to
     // scope the output-composition diagnostics.
     mutable bool vo_pass{};

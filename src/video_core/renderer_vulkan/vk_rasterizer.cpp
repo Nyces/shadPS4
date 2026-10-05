@@ -273,6 +273,14 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
                      liverpool->regs.viewports[0].xscale, liverpool->regs.viewports[0].yscale);
         }
     }
+    // A target that some pass reads while rendering into it is an in-place blit. It can never
+    // be enlarged: the identity copy would become a scaling one that reads the pixels it just
+    // wrote, so it is left at the size the game chose even when a later pass samples an
+    // enlarged target. Learned from the passes already seen, so it holds from the frame after
+    // the in-place pass is first observed.
+    if (in_place_targets.contains(desc.info.guest_address)) {
+        return;
+    }
     // A target that has already been rendered at the presentation scale keeps that extent for
     // every later pass that addresses it, whatever size its own registers describe. A pass whose
     // color binding is disabled comes back with an empty descriptor, and the background layers
@@ -396,8 +404,15 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // same size, because the mapping is the identity, but enlarging the target turns
         // it into a scaling blit that reads pixels it has already written, so the result
         // collapses to black. Leave such targets at the size the game chose.
-        const bool in_place_blit =
-            regs.IsClipDisabled() && SamplesAddress(pipeline, col_buf.Address());
+        const bool samples_own_target = SamplesAddress(pipeline, col_buf.Address());
+        if (samples_own_target) {
+            // A pass that samples the allocation it draws into makes it an in-place blit.
+            // Remember the address: enlarging such a target turns the identity copy into a
+            // scaling copy that reads the pixels it just wrote and collapses to black, so it
+            // stays at the size the game chose whatever clip state this or a later pass uses.
+            in_place_targets.insert(col_buf.Address());
+        }
+        const bool in_place_blit = regs.IsClipDisabled() && samples_own_target;
         {
             const u32 sharp_width = desc.info.size.width;
             const u32 sharp_height = desc.info.size.height;
