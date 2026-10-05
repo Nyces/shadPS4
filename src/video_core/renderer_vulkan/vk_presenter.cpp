@@ -23,6 +23,7 @@
 #include "video_core/renderer_vulkan/vk_presenter.h"
 #include "video_core/renderer_vulkan/vk_rasterizer.h"
 #include "video_core/texture_cache/image.h"
+#include "video_core/texture_cache/image_info.h"
 
 #include <algorithm>
 #include <array>
@@ -463,6 +464,24 @@ static void SavePendingScreenshot(const ScreenshotReadback& readback) {
 }
 
 void Presenter::DumpScaledSurfaces() {
+    // Recording a readback of every enlarged surface is expensive and the screenshot hotkey can
+    // repeat, so rate limit the dump to once every couple of seconds.
+    static std::chrono::steady_clock::time_point last_dump{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - last_dump < std::chrono::seconds(2)) {
+        return;
+    }
+    last_dump = now;
+
+    struct PendingDump {
+        std::shared_ptr<VideoCore::Buffer> buffer;
+        std::filesystem::path path;
+        u32 width;
+        u32 height;
+        u32 bytes_per_pixel;
+    };
+    std::vector<PendingDump> pending;
+
     const auto& screenshots_dir = Common::FS::GetUserPath(Common::FS::PathType::ScreenshotsDir);
     std::filesystem::create_directories(screenshots_dir);
     static std::atomic<u32> dump_sequence{0};
@@ -483,7 +502,8 @@ void Presenter::DumpScaledSurfaces() {
         const u32 height = image.info.size.height;
         const u32 bytes_per_pixel = std::max(image.info.num_bits / 8u, 1u);
         const u64 byte_size = static_cast<u64>(width) * static_cast<u64>(height) * bytes_per_pixel;
-        VideoCore::Buffer buffer{instance, 0, byte_size, VideoCore::MemoryType::HostCached};
+        auto buffer = std::make_shared<VideoCore::Buffer>(instance, 0, byte_size,
+                                                          VideoCore::MemoryType::HostCached);
         const vk::BufferImageCopy copy_region = {
             .bufferOffset = 0,
             .bufferRowLength = 0,
@@ -495,26 +515,43 @@ void Presenter::DumpScaledSurfaces() {
             .imageOffset = {0, 0, 0},
             .imageExtent = {width, height, 1},
         };
-        runtime.DownloadImage(&image, &buffer, std::span{&copy_region, 1});
-        if (buffer.mapped_data.size() < byte_size) {
-            continue;
-        }
-        std::vector<u8> rgba(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
-        const u8* src = buffer.mapped_data.data();
-        for (size_t i = 0; i < static_cast<size_t>(width) * static_cast<size_t>(height); ++i) {
-            const u8* pixel = src + i * bytes_per_pixel;
-            rgba[i * 4 + 0] = pixel[0];
-            rgba[i * 4 + 1] = bytes_per_pixel > 1 ? pixel[1] : pixel[0];
-            rgba[i * 4 + 2] = bytes_per_pixel > 2 ? pixel[2] : pixel[0];
-            rgba[i * 4 + 3] = 255;
-        }
-        const auto path = screenshots_dir / fmt::format("scaled_{:03}_{:#x}_{}x{}.png", sequence,
-                                                        surface.address, width, height);
-        if (WritePng(path, rgba, width, height)) {
-            LOG_INFO(Render_Vulkan, "Dumped scaled surface {} ({}x{})", path.string(), width,
-                     height);
-        }
+        runtime.DownloadImage(&image, buffer.get(), std::span{&copy_region, 1});
+        pending.push_back({std::move(buffer),
+                           screenshots_dir / fmt::format("scaled_{:03}_{:#x}_{}x{}.png", sequence,
+                                                         surface.address, width, height),
+                           width, height, bytes_per_pixel});
     }
+
+    if (pending.empty()) {
+        return;
+    }
+
+    // The copies are only recorded here; the readback has to wait until the command buffer that
+    // contains them has actually executed, otherwise the host buffer is still untouched zeroes.
+    draw_scheduler.DeferPriorityOperation([pending = std::move(pending)]() {
+        for (const auto& dump : pending) {
+            const u64 byte_size =
+                static_cast<u64>(dump.width) * static_cast<u64>(dump.height) * dump.bytes_per_pixel;
+            if (dump.buffer->mapped_data.size() < byte_size) {
+                continue;
+            }
+            std::vector<u8> rgba(static_cast<size_t>(dump.width) *
+                                 static_cast<size_t>(dump.height) * 4);
+            const u8* src = dump.buffer->mapped_data.data();
+            for (size_t i = 0;
+                 i < static_cast<size_t>(dump.width) * static_cast<size_t>(dump.height); ++i) {
+                const u8* pixel = src + i * dump.bytes_per_pixel;
+                rgba[i * 4 + 0] = pixel[0];
+                rgba[i * 4 + 1] = dump.bytes_per_pixel > 1 ? pixel[1] : pixel[0];
+                rgba[i * 4 + 2] = dump.bytes_per_pixel > 2 ? pixel[2] : pixel[0];
+                rgba[i * 4 + 3] = 255;
+            }
+            if (WritePng(dump.path, rgba, dump.width, dump.height)) {
+                LOG_INFO(Render_Vulkan, "Dumped scaled surface {} ({}x{})", dump.path.string(),
+                         dump.width, dump.height);
+            }
+        }
+    });
 }
 
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
