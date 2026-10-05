@@ -51,14 +51,15 @@ struct ScaledSurface {
 std::mutex g_scaled_mutex;
 std::vector<ScaledSurface> g_scaled_ranges;
 
-const ScaledSurface* FindScaledRange(VAddr address) {
+bool FindScaledRange(VAddr address, ScaledSurface& out) {
     std::scoped_lock lock{g_scaled_mutex};
     for (const auto& entry : g_scaled_ranges) {
         if (address >= entry.base && address < entry.base + entry.size) {
-            return &entry;
+            out = entry;
+            return true;
         }
     }
-    return nullptr;
+    return false;
 }
 
 void RecordScaledRange(VAddr address, u32 size, u32 width, u32 height, u32 pitch, u32 guest_size) {
@@ -100,19 +101,15 @@ static void ApplyResolutionScale(ImageInfo& info) {
     }
     info.size.width *= scale;
     info.size.height *= scale;
-    // The tiled layout has to grow with the surface. Sampled surfaces are fetched through this
-    // layout, so leaving it at the guest size would make every deferred lighting read land on the
-    // wrong data, which removes the whole 3D image while leaving linear 2D surfaces untouched.
     info.pitch *= scale;
-    for (auto& mip : info.mips_layout) {
-        mip.size *= area;
+    // Rebuild the whole layout for the larger extent. Patching the fields by hand left the mip
+    // heights, mip pitches, mip offsets and the total guest size describing the old 1080p layout,
+    // so a tiled surface with mip levels (the UI blur pyramid for instance) addressed the wrong
+    // memory and each level overwrote the next one.
+    info.UpdateSize();
+    if (info.stencil_size != 0) {
+        info.stencil_size *= area;
     }
-    // The guest layout has to grow with the surface too. Leaving guest_size at the size the game
-    // chose keeps the memory tracker, the page watchers and the upload/download bounds describing a
-    // 1080p surface while the host image is four times larger, so everything past the first quarter
-    // never reaches the image the passes render into and the 3D disappears completely.
-    info.guest_size *= area;
-    info.stencil_size *= area;
     RecordScaledRange(info.guest_address, guest_size, info.size.width, info.size.height, info.pitch,
                       info.guest_size);
 }
@@ -247,25 +244,23 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
     // If this address already backs a scaled render target, adopt exactly the same extent, pitch
-    // and mip layout the render path recorded. Scaling only the extent keeps the two values
+    // and layout the render path recorded. Scaling only the extent keeps the two values
     // disagreeing, and the texture cache then keeps a second, never written image over the same
     // memory, which is what leaves sampled layers such as the blurred background black.
-    if (const ScaledSurface* scaled = FindScaledRange(image.Address())) {
+    ScaledSurface scaled{};
+    if (FindScaledRange(image.Address(), scaled)) {
         static std::atomic<u32> sampled_logged{0};
         if (sampled_logged.fetch_add(1, std::memory_order_relaxed) < 40) {
             LOG_INFO(Render_Vulkan,
                      "Sampled surface {:#x} {}x{} pitch {:#x} -> reuse {}x{} pitch {:#x}",
-                     guest_address, size.width, size.height, pitch, scaled->width, scaled->height,
-                     scaled->pitch);
+                     guest_address, size.width, size.height, pitch, scaled.width, scaled.height,
+                     scaled.pitch);
         }
-        size.width = scaled->width;
-        size.height = scaled->height;
-        pitch = scaled->pitch;
-        guest_size = scaled->guest_size;
-        const u32 area = GetResolutionScale() * GetResolutionScale();
-        for (auto& mip : mips_layout) {
-            mip.size *= area;
-        }
+        size.width = scaled.width;
+        size.height = scaled.height;
+        pitch = scaled.pitch;
+        // Rebuild the layout so the sampled image matches the render target region for region.
+        UpdateSize();
     }
 }
 
