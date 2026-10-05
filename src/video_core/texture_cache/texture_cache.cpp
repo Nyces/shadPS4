@@ -1,8 +1,6 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-#include <unordered_set>
-
 #include <xxhash.h>
 
 #include "common/assert.h"
@@ -605,23 +603,6 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     }
     if (view_slice > 0) {
         desc.view_info.range.base.layer = view_slice;
-    }
-
-    if (desc.type == BindingType::Texture && image.info.size.width != info.size.width) {
-        // A sample resolved to an image whose extent differs from the one the guest declared.
-        // Under upscaling this is how a render target enlarged by the presentation scale and
-        // a sampler over the same range drift apart: the passes write the enlarged image
-        // while the sample reads a differently-sized one over the same memory, so it keeps
-        // returning whatever that other image holds. Report every such address once.
-        static std::unordered_set<u64> split_samples;
-        const u64 split_key = (u64(info.guest_address) << 20) ^ (u64(info.size.width) << 10) ^
-                              u64(image.info.size.width);
-        if (split_samples.insert(split_key).second) {
-            LOG_INFO(Render_Vulkan,
-                     "Split sample: addr={:#x}, declared={}x{}, resolved={}x{}, guestSize={:#x}",
-                     info.guest_address, info.size.width, info.size.height, image.info.size.width,
-                     image.info.size.height, info.guest_size);
-        }
     }
 
     return image_id;

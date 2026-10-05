@@ -189,13 +189,8 @@ private:
     // describe the original size, so the sampling path has to look the image up at the
     // enlarged extent instead, or it would resolve a second image over the same memory.
     std::unordered_map<VAddr, std::pair<u32, u32>> upscaled_targets;
-    // Set while the current draw renders into a registered VideoOut surface, used to
-    // scope the output-composition diagnostics.
+    // Set while the current draw renders into a registered VideoOut surface.
     mutable bool vo_pass{};
-    // Set while the current draw presents an offscreen target that was rendered at the
-    // presentation scale. Its contents are already at the full size, so it must not
-    // receive the window-to-surface ratio the other output passes need.
-    mutable bool presents_upscaled{};
     // Set for the layers whose vertex program builds its clip position from the window
     // size it reads back from a constant buffer instead of from the vertex positions.
     // That buffer already holds the enlarged surface while the glyph coordinates stay

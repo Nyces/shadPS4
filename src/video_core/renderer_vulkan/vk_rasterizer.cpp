@@ -3,8 +3,6 @@
 
 #include <bit>
 #include <cmath>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "common/debug.h"
 #include "core/emulator_settings.h"
@@ -138,29 +136,6 @@ static bool SamplesAddress(const GraphicsPipeline* pipeline, VAddr address) {
     return false;
 }
 
-// Returns whether any stage samples one of the offscreen targets that are rendered at
-// the presentation scale. Such a pass is presenting the scene we already rasterized at
-// the full size, so its geometry needs no further stretching, while a pass that reads
-// none of them is drawing content still laid out for the game's original window.
-static bool SamplesUpscaledTarget(
-    const GraphicsPipeline* pipeline,
-    const std::unordered_map<VAddr, std::pair<u32, u32>>& upscaled_targets) {
-    if (upscaled_targets.empty()) {
-        return false;
-    }
-    for (const auto* stage : pipeline->GetStages()) {
-        if (!stage) {
-            continue;
-        }
-        for (const auto& image_desc : stage->images) {
-            if (upscaled_targets.contains(image_desc.GetSharp(*stage).Address())) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
 // Enlarges a color target descriptor to the presentation scale when it is one of the
 // offscreen targets the game sized for its own window. The render path, the sampling
 // path and the resolve path all have to agree on which targets are enlarged and by how
@@ -203,15 +178,8 @@ void Rasterizer::RecordGuestWindow(u32 scissor_width, u32 scissor_height) {
     if (scissor_width * 2 < vo_ext.width || scissor_height * 2 < vo_ext.height) {
         return;
     }
-    const u32 prev_width = guest_window_width;
-    const u32 prev_height = guest_window_height;
     guest_window_width = std::max(guest_window_width, scissor_width);
     guest_window_height = std::max(guest_window_height, scissor_height);
-    if (guest_window_width != prev_width || guest_window_height != prev_height) {
-        LOG_INFO(Render_Vulkan, "Guest window: {}x{} against surface {}x{}, presentation scale {}",
-                 guest_window_width, guest_window_height, vo_ext.width, vo_ext.height,
-                 PresentationScale());
-    }
 }
 
 float Rasterizer::PresentationScale() const {
@@ -249,28 +217,6 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     }
     if (liverpool->FindVideoOutSurface(desc.info.guest_address)) {
         return;
-    }
-    // TEMPORARY DIAGNOSTIC: report the decision for every distinct offscreen target so the
-    // ones still sitting at the game's window size can be told from the ones this rule never
-    // reaches. The 2D composition surface (the one the post-process passes write) is the
-    // target of interest: it is 1920x1080 like the scene, so it either gets enlarged here or
-    // something upstream keeps its descriptor from matching the recorded window.
-    {
-        static std::unordered_set<u64> diag_seen;
-        if (diag_seen.insert(u64(desc.info.guest_address)).second) {
-            const bool matches = desc.info.size.width == guest_window_width &&
-                                 desc.info.size.height == guest_window_height;
-            LOG_INFO(Render_Vulkan,
-                     "ApplyScale: addr={:#x} desc={}x{} guestWindow={}x{} fit={} voExt={}x{} "
-                     "isVideoOut={} matches={} clipDisabled={} scissor={}x{} vpScale={}x{}",
-                     desc.info.guest_address, desc.info.size.width, desc.info.size.height,
-                     guest_window_width, guest_window_height, fit, vo_ext.width, vo_ext.height,
-                     liverpool->FindVideoOutSurface(desc.info.guest_address) != nullptr, matches,
-                     liverpool->regs.IsClipDisabled(),
-                     AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x),
-                     AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y),
-                     liverpool->regs.viewports[0].xscale, liverpool->regs.viewports[0].yscale);
-        }
     }
     // A target that has already been rendered at the presentation scale keeps that extent for
     // every later pass that addresses it, whatever size its own registers describe. A pass whose
@@ -329,7 +275,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
     vo_fit_x = 1.0f;
     vo_fit_y = 1.0f;
     vo_pass = false;
-    presents_upscaled = false;
     rt_fit_x = 1.0f;
     rt_fit_y = 1.0f;
     rt_fit_width = 0;
@@ -412,36 +357,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
 
-        {
-            // Report every distinct render target with the register state it was derived
-            // from, to locate the ones the game still allocates at its original size.
-            // The address is part of the key: two allocations that happen to share a
-            // size and a format are distinct targets, and merging their reports hid
-            // the scene buffer behind another one of the same shape.
-            static std::unordered_set<u64> logged_rt;
-            const u64 rt_key = (u64(col_buf.Address() >> 12) << 40) ^
-                               (u64(image.info.size.width) << 28) ^
-                               (u64(image.info.size.height) << 16) ^
-                               u64(static_cast<u32>(image.info.pixel_format));
-            if (logged_rt.insert(rt_key).second) {
-                LOG_INFO(Render_Vulkan,
-                         "RT: {}x{} decl={} fmt={} addr={:#x} pitch={} regPitch={} regHeight={} "
-                         "hint={}x{} valid={} scsr={}x{} tileMax={} sliceMax={} tileMode={} "
-                         "sliceSize={:#x} guestSize={:#x} samples={} upscaled={}",
-                         image.info.size.width, image.info.size.height,
-                         vk::to_string(desc.info.pixel_format),
-                         vk::to_string(image.info.pixel_format), col_buf.Address(),
-                         image.info.pitch, col_buf.Pitch(), col_buf.Height(), hint.width,
-                         hint.height, hint.Valid(),
-                         AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x),
-                         AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y),
-                         col_buf.pitch.tile_max, col_buf.slice.tile_max,
-                         static_cast<u32>(col_buf.GetTileMode()), col_buf.GetColorSliceSize(),
-                         image.info.guest_size, image.info.num_samples,
-                         upscaled_targets.contains(image.info.guest_address));
-            }
-        }
-
         // A registered VideoOut surface defines the presentation window. When the game
         // still clips to a smaller window than the surface it renders into (e.g. a
         // resolution patch enlarged the output buffer and the vertex positions, but the
@@ -451,7 +366,6 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // because the texture cache may replace the image object while the registration
         // stays valid.
         if (const auto* vo = liverpool->FindVideoOutSurface(col_buf.Address()); vo) {
-            const auto& vp = regs.viewports[0];
             const u32 scsr_w = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_x);
             const u32 scsr_h = AmdGpu::Scissor::Clamp(regs.screen_scissor.bottom_right_y);
             vo_pass = true;
@@ -477,31 +391,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             // that present an enlarged target was tried and moved the composition to the
             // top-left quarter of the screen, which is where it lands with no scaling at
             // all, so the ratio is what puts that blit over the whole surface and it is
-            // correct for every output pass. Keep tracking what the pass reads for the
-            // diagnostics, since that is the only thing separating the composition from
-            // the interface.
-            presents_upscaled = SamplesUpscaledTarget(pipeline, upscaled_targets);
+            // correct for every output pass.
             if (vo_known_fit_x > 1.001f || vo_known_fit_y > 1.001f) {
                 vo_fit_x = vo_known_fit_x;
                 vo_fit_y = vo_known_fit_y;
                 output_upscaled = true;
-            }
-            // Report every pass targeting the output surface, including the ones that
-            // need no adjusting, so the whole composition can be reconstructed.
-            static std::unordered_set<u64> logged;
-            const u64 log_key = (u64(scsr_w) << 32) | (u64(scsr_h) << 16) |
-                                (u64(static_cast<u32>(regs.primitive_type)) << 4) |
-                                (regs.IsClipDisabled() ? 2u : 0u) |
-                                (regs.viewport_control.xscale_enable ? 1u : 0u);
-            if (logged.insert(log_key).second) {
-                LOG_INFO(Render_Vulkan,
-                         "VideoOut pass: surface {}x{}, prim={}, clipDisabled={}, vte=({},{}), "
-                         "vp=({},{},{},{}), screenScissor={}x{}, mrt={:#x}, opened={}, fit={}x{}",
-                         vo->width, vo->height, static_cast<u32>(regs.primitive_type),
-                         regs.IsClipDisabled(), regs.viewport_control.xscale_enable,
-                         regs.viewport_control.yscale_enable, vp.xoffset, vp.yoffset, vp.xscale,
-                         vp.yscale, scsr_w, scsr_h, key.mrt_mask, output_upscaled, vo_fit_x,
-                         vo_fit_y);
             }
         }
     }
@@ -606,109 +500,9 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     UpdateDynamicState(pipeline, is_indexed);
     scheduler.BeginRendering(state);
 
-    // A text-layer draw takes the window-to-surface ratio even though its viewport
-    // registers already cover the surface, because its glyph coordinates are still laid
-    // out for the original window. Report it once per output surface so the run can be
-    // matched against the "Final viewport" report above, where the doubled width shows.
-    if (text_layer_upscale) {
-        static std::unordered_set<u64> logged_text;
-        const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 8) |
-                        (liverpool->regs.IsClipDisabled() ? 8u : 0u) |
-                        u64(liverpool->regs.primitive_type);
-        if (logged_text.insert(key).second) {
-            LOG_INFO(Render_Vulkan, "Text layer: cb0={:#x}, prim={}, clipDisabled={}, ratio={}x{}",
-                     liverpool->regs.color_buffers[0].Address(),
-                     static_cast<u32>(liverpool->regs.primitive_type),
-                     liverpool->regs.IsClipDisabled(), vo_fit_x, vo_fit_y);
-        }
-    }
-
-    // Fingerprint every distinct pass, so a layer whose result changes under upscaling
-    // can be pinned down. A pass that disappears, or one that binds fewer inputs, is only
-    // visible here, and the target extent, the viewport and the scissor tell whether its
-    // quad still covers the enlarged target. Both runs share the game's program hashes,
-    // so a differing pair is exactly a permutation difference, reported once per pass.
-    {
-        // A depth-only pass has no fragment stage, so read the array directly instead of
-        // GetStage, which dereferences the slot unconditionally.
-        const auto stages = pipeline->GetStages();
-        const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
-            const u32 index = u32(s);
-            return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
-        };
-        const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
-        const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
-        static std::unordered_set<u64> logged_shaders;
-        const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
-                        (vs_hash << 20) ^ fs_hash;
-        if (logged_shaders.insert(key).second) {
-            // Count the shader's image inputs and how many of them the game actually
-            // bound this frame, so a layer that loses its source under upscaling shows
-            // as a bound count that dropped without the program changing.
-            u32 declared_inputs = 0;
-            u32 bound_inputs = 0;
-            for (const auto* stage : stages) {
-                if (!stage) {
-                    continue;
-                }
-                for (const auto& image_desc : stage->images) {
-                    ++declared_inputs;
-                    const auto tsharp = image_desc.GetSharp(*stage);
-                    if (tsharp.Address() != 0 &&
-                        tsharp.GetDataFmt() != AmdGpu::DataFormat::FormatInvalid) {
-                        ++bound_inputs;
-                    }
-                }
-            }
-            const auto& vp = liverpool->regs.viewports[0];
-            const u32 scsr_w =
-                AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x);
-            const u32 scsr_h =
-                AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y);
-            const bool cb0_bound = static_cast<bool>(cb_descs[0].first);
-            const auto& cb0_size = cb_descs[0].second.info.size;
-            LOG_INFO(Render_Vulkan,
-                     "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
-                     "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
-                     "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}",
-                     liverpool->regs.color_buffers[0].Address(), cb0_bound ? cb0_size.width : 0u,
-                     cb0_bound ? cb0_size.height : 0u,
-                     static_cast<u32>(liverpool->regs.primitive_type),
-                     liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, bound_inputs,
-                     declared_inputs, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, scsr_w, scsr_h,
-                     liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
-                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()));
-        }
-    }
-
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
     const auto& fetch_shader = pipeline->GetFetchShader();
     const auto [vertex_offset, instance_offset] = GetDrawOffsets(regs, vs_info, fetch_shader);
-
-    // Dump the per-draw constants of the composition layers. The shader pair and the bound
-    // inputs match between the native and the upscaled run, so the blend factor and the
-    // scales these shaders read back from their constant buffers are what is left to compare.
-    if (const u64 vs_hash = vs_info.pgm_hash;
-        vs_hash == 0x2d1f9f75ull || vs_hash == 0x105b8d9full || vs_hash == 0x406058cbull ||
-        vs_hash == 0x206c135bull || vs_hash == 0x5f49d3d1ull) {
-        static std::unordered_set<u64> logged_consts;
-        const u64 ud0 = vs_info.user_data.size() > 1 ? vs_info.user_data[0] : 0u;
-        const u64 ud1 = vs_info.user_data.size() > 1 ? vs_info.user_data[1] : 0u;
-        const VAddr cb = VAddr((ud1 << 32) | ud0);
-        const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 24) ^
-                        (vs_hash << 4) ^ (ud0 & 0xFull);
-        if (logged_consts.insert(key).second) {
-            float values[16]{};
-            if (cb != 0 && memory->IsValidMapping(cb, sizeof(values))) {
-                memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
-            }
-            LOG_INFO(Render_Vulkan,
-                     "Layer constants: cb0={:#x}, vs={:#x}, ud0={:#x}, ud1={:#x}, cb={:#x}, "
-                     "f=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
-                     liverpool->regs.color_buffers[0].Address(), vs_hash, ud0, ud1, cb, values[0],
-                     values[1], values[2], values[3], values[4], values[5], values[6], values[7]);
-        }
-    }
 
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
@@ -937,20 +731,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
             push_data.xscale *= rt_fit_x;
             push_data.yoffset *= rt_fit_y;
             push_data.yscale *= rt_fit_y;
-            // Report every distinct pass the ratio is applied to, with the conversion
-            // it ends up with, to verify the quad then covers the enlarged target.
-            static std::unordered_set<u64> logged_pp;
-            const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
-                          (u64(std::bit_cast<u32>(push_data.xoffset)) << 2) ^
-                          u64(std::bit_cast<u32>(push_data.yscale));
-            if (logged_pp.insert(k).second) {
-                LOG_INFO(Render_Vulkan,
-                         "Upscaled RT clip-disabled pass: cb0={:#x}, fit={}x{}, "
-                         "rtFitExtent={}x{}, push=({},{},{},{})",
-                         liverpool->regs.color_buffers[0].Address(), rt_fit_x, rt_fit_y,
-                         rt_fit_width, rt_fit_height, push_data.xoffset, push_data.yoffset,
-                         push_data.xscale, push_data.yscale);
-            }
         }
     }
     for (const auto* stage : pipeline->GetStages()) {
@@ -1265,14 +1045,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // Repeat the extent check the render path used rather than trusting the
             // address alone: these allocations are recycled for surfaces of other sizes,
             // and enlarging one of those would look up an image that was never rendered.
-            bool report_sampling = false;
-            bool sampling_adjusted = false;
-            u32 sharp_width = 0;
-            u32 sharp_height = 0;
             if (const auto up = upscaled_targets.find(desc.info.guest_address);
                 up != upscaled_targets.end()) {
-                sharp_width = desc.info.size.width;
-                sharp_height = desc.info.size.height;
                 // Look the target up at the extent the render path created it at. The
                 // recorded extent is authoritative: the game's descriptor can describe the
                 // allocation at a size the presentation-scale rule does not recognise, and
@@ -1283,36 +1057,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     desc.info.size.width = up->second.first;
                     desc.info.size.height = up->second.second;
                 }
-                sampling_adjusted = desc.info.size.width != sharp_width;
-                report_sampling = true;
             }
 
             image_id = texture_cache.FindImage(desc);
             auto* image = &texture_cache.GetImage(image_id);
-
-            if (report_sampling) {
-                // Report the image the lookup actually resolved to, and keep reporting
-                // it periodically. Logging only the first occurrence hides the steady
-                // state behind the first frame, where the source has not been rendered
-                // yet and a black sample is expected. An adjusted descriptor can also
-                // resolve to a different image than the one the render path created,
-                // and a resolved extent that is not the enlarged one, or one without
-                // GpuModified, would each sample black with correct geometry.
-                static std::unordered_map<u64, u32> smp_hits;
-                const u64 k = (u64(desc.info.guest_address) << 24) ^
-                              (u64(desc.info.size.width) << 12) ^ desc.info.size.height;
-                if (++smp_hits[k] % 600 == 1) {
-                    LOG_INFO(Render_Vulkan,
-                             "Sampling upscaled target: addr={:#x}, sharp={}x{}, pitch={}, "
-                             "adjusted={}, lookup={}x{}, resolved={}x{}, gpuModified={}, "
-                             "cpuDirty={}",
-                             desc.info.guest_address, sharp_width, sharp_height, desc.info.pitch,
-                             sampling_adjusted, desc.info.size.width, desc.info.size.height,
-                             image->info.size.width, image->info.size.height,
-                             True(image->flags & VideoCore::ImageFlagBits::GpuModified),
-                             True(image->flags & VideoCore::ImageFlagBits::CpuDirty));
-                }
-            }
 
             if (auto depth_image_id = texture_cache.GetAssociatedDepth(*image)) {
                 // If this image has an associated depth image, it's a stencil attachment.
@@ -1347,65 +1095,6 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
 
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
-
-            {
-                // Report every image a pass reads, alongside the output it feeds, in both
-                // the native and the upscaled run. The scene reaches the composition source
-                // through a chain of post-process passes, and a layer that goes missing under
-                // upscaling only shows as the composite binding fewer inputs, which is not
-                // visible anywhere else. Log each input periodically so the steady state is
-                // captured and the two runs can be compared entry by entry.
-                static std::unordered_map<u64, u32> pp_hits;
-                const u64 k = (u64(liverpool->regs.color_buffers[0].Address()) << 24) ^
-                              (u64(image.info.guest_address) << 12) ^ image.info.size.width;
-                if (++pp_hits[k] % 60 == 1) {
-                    LOG_INFO(
-                        Render_Vulkan,
-                        "Post-process input: out={:#x}, shader={:#x}, reads decl={} fmt={} {}x{} "
-                        "addr={:#x}, pitch={}, ask={}x{}, descAddr={:#x}, recorded={}, "
-                        "gpuModified={}, upscaled={}",
-                        liverpool->regs.color_buffers[0].Address(), stage.pgm_hash,
-                        vk::to_string(desc.info.pixel_format),
-                        vk::to_string(image.info.pixel_format), image.info.size.width,
-                        image.info.size.height, image.info.guest_address, image.info.pitch,
-                        desc.info.size.width, desc.info.size.height, desc.info.guest_address,
-                        upscaled_targets.contains(desc.info.guest_address),
-                        True(image.flags & VideoCore::ImageFlagBits::GpuModified),
-                        upscaled_targets.contains(image.info.guest_address));
-                }
-            }
-
-            if (vo_pass) {
-                // Report what every pass targeting the output surface reads, and how its
-                // positions are converted, to tell apart a geometry problem from a
-                // sampling one. Periodically, so the steady state is visible and not only
-                // the first frame, where the source has not been rendered yet.
-                //
-                // Clip-enabled passes are included. The game draws 3D content straight
-                // into the surface with a real projection, and restricting this report to
-                // the clip-disabled blits hid those passes entirely, which is what left
-                // the source of the scene magnification invisible in the log.
-                static std::unordered_map<u64, u32> blit_hits;
-                const u64 k = (u64(image.info.guest_address) << 24) ^
-                              (u64(image.info.size.width) << 12) ^ image.info.size.height ^
-                              (u64(static_cast<u32>(liverpool->regs.primitive_type)) << 40);
-                if (++blit_hits[k] % 600 == 1) {
-                    const auto& vp = liverpool->regs.viewports[0];
-                    LOG_INFO(Render_Vulkan,
-                             "VideoOut source: reads {}x{} addr={:#x}, pitch={}, "
-                             "guestSize={:#x}, gpuModified={}, upscaled={}, "
-                             "vp=({},{},{},{}), fit={}x{}, numIndices={}, prim={}, "
-                             "clipDisabled={}",
-                             image.info.size.width, image.info.size.height,
-                             image.info.guest_address, image.info.pitch, image.info.guest_size,
-                             True(image.flags & VideoCore::ImageFlagBits::GpuModified),
-                             upscaled_targets.contains(image.info.guest_address), vp.xoffset,
-                             vp.yoffset, vp.xscale, vp.yscale, vo_fit_x, vo_fit_y,
-                             liverpool->regs.num_indices,
-                             static_cast<u32>(liverpool->regs.primitive_type),
-                             liverpool->regs.IsClipDisabled());
-                }
-            }
 
             // The image is either bound as storage in a separate descriptor or bound as render
             // target in feedback loop. Depth images are excluded because they can't be bound as
@@ -1621,55 +1310,6 @@ RenderState Rasterizer::BeginRendering(const GraphicsPipeline* pipeline) {
             state.width = std::max<u32>(state.width, cb0.size.width);
             state.height = std::max<u32>(state.height, cb0.size.height);
         }
-
-        // Report what a pass drawing into an enlarged target actually gets, so a target
-        // that is never rendered at its new size can be told apart from one that is
-        // rendered correctly but sampled wrong.
-        static std::unordered_set<u64> logged_up;
-        const auto& vp = liverpool->regs.viewports[0];
-        const VAddr cb0_addr =
-            cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.guest_address : 0;
-        const u64 up_key = (u64(cb0_addr) << 20) ^ (u64(state.width) << 12) ^
-                           (u64(static_cast<u32>(liverpool->regs.primitive_type)) << 4) ^
-                           (u64(u32(std::abs(vp.xscale))) << 32) ^
-                           (state.depth_stencil_attachment.has_depth ? 1u : 0u);
-        if (logged_up.insert(up_key).second) {
-            LOG_INFO(
-                Render_Vulkan,
-                "Upscaled RT pass: area={}x{}, cb0={}x{} addr={:#x}, db={}x{}, depth={}, "
-                "vp=({},{},{},{}), screenScissor={}x{}, prim={}, clipDisabled={}",
-                state.width, state.height,
-                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.width : 0,
-                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.height : 0,
-                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.guest_address
-                                  : 0,
-                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.width : 0,
-                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.height : 0,
-                state.depth_stencil_attachment.has_depth, vp.xoffset, vp.yoffset, vp.xscale,
-                vp.yscale, AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x),
-                AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y),
-                static_cast<u32>(liverpool->regs.primitive_type), liverpool->regs.IsClipDisabled());
-        }
-    }
-
-    if (vo_pass) {
-        // The render area is the intersection of all attachments, so a stale
-        // attachment shrinks it and crops the frame regardless of the scissor.
-        static std::unordered_set<u64> logged_area;
-        const u64 area_key = (u64(state.width) << 32) | (u64(state.height) << 16) |
-                             (u64(state.num_color_attachments) << 2) |
-                             (state.depth_stencil_attachment.has_depth ? 1u : 0u);
-        if (logged_area.insert(area_key).second) {
-            LOG_INFO(
-                Render_Vulkan,
-                "VideoOut render area: {}x{}, colors={}, depth={}, cb0={}x{}, db={}x{}",
-                state.width, state.height, state.num_color_attachments,
-                state.depth_stencil_attachment.has_depth,
-                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.width : 0,
-                cb_descs[0].first ? texture_cache.GetImage(cb_descs[0].first).info.size.height : 0,
-                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.width : 0,
-                db_desc.first ? texture_cache.GetImage(db_desc.first).info.size.height : 0);
-        }
     }
 
     return state;
@@ -1721,25 +1361,6 @@ void Rasterizer::Resolve() {
     }
     auto& mrt0_image = texture_cache.GetImage(texture_cache.FindImage(mrt0_desc, true));
     auto& mrt1_image = texture_cache.GetImage(texture_cache.FindImage(mrt1_desc, true));
-
-    {
-        static std::unordered_set<u64> logged_resolve;
-        const u64 k = (u64(mrt0_desc.info.guest_address >> 12) << 24) ^
-                      (u64(mrt1_desc.info.guest_address >> 12) << 4) ^
-                      u64(mrt0_image.info.size.width);
-        if (logged_resolve.insert(k).second) {
-            LOG_INFO(Render_Vulkan,
-                     "Resolve: mrt0={}x{} addr={:#x} samples={}, mrt1={}x{} addr={:#x} "
-                     "samples={}, requested {}x{} -> {}x{}, recorded={}",
-                     mrt0_image.info.size.width, mrt0_image.info.size.height,
-                     mrt0_image.info.guest_address, mrt0_image.info.num_samples,
-                     mrt1_image.info.size.width, mrt1_image.info.size.height,
-                     mrt1_image.info.guest_address, mrt1_image.info.num_samples,
-                     mrt0_desc.info.size.width, mrt0_desc.info.size.height,
-                     mrt1_desc.info.size.width, mrt1_desc.info.size.height,
-                     upscaled_targets.contains(mrt1_desc.info.guest_address));
-        }
-    }
 
     ScopeMarkerBegin(fmt::format("Resolve:MRT0={:#x}:MRT1={:#x}",
                                  liverpool->regs.color_buffers[0].Address(),
@@ -2073,24 +1694,6 @@ void Rasterizer::UpdateViewportScissorState() const {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
                 }
-                // Report the raw register state of every distinct enlarged-target
-                // clip-enabled pass so the viewport values handed to Vulkan can be
-                // traced back to what the game actually wrote. The per-axis rule
-                // keys on screen_scissor and rt_fit, and a viewport that exceeds
-                // its own target is the signature of an over-applied scale.
-                static std::unordered_set<u64> logged_rtvp;
-                const u64 rtvp_k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 28) ^
-                                   (u64(std::bit_cast<u32>(vp.xscale)) << 14) ^
-                                   u64(std::bit_cast<u32>(vp.yscale));
-                if (logged_rtvp.insert(rtvp_k).second) {
-                    LOG_INFO(Render_Vulkan,
-                             "RT viewport raw: cb0={:#x}, rawVP=({},{},{},{}), "
-                             "scissor=({},{}) {}x{}, rtFit={}x{}, convertedXY={}{}",
-                             liverpool->regs.color_buffers[0].Address(), vp.xoffset, vp.yoffset,
-                             vp.xscale, vp.yscale, regs.screen_scissor.top_left_x,
-                             regs.screen_scissor.top_left_y, scsr_w, scsr_h, rt_fit_x, rt_fit_y,
-                             converted_x, converted_y);
-                }
             }
         }
 
@@ -2129,38 +1732,6 @@ void Rasterizer::UpdateViewportScissorState() const {
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
             .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
         });
-
-        if (i == 0) {
-            // Report what is actually handed to Vulkan, in both the native and the upscaled
-            // run, so the two can be compared pass by pass. The
-            // register-level diagnostics above cannot show whether a pass ended up
-            // covering its target, because the correction is applied here and in the
-            // push data, so a geometry that leaves the target can only be told apart
-            // from one that fills it by the final values.
-            // The primitive type and what the pass reads are part of the key. Two passes
-            // targeting the same surface can end up with an identical viewport while
-            // needing opposite treatment: the interface and the pass presenting the
-            // scene both arrive with the same registers, and keying on the extent alone
-            // reported only whichever came first and hid the other completely.
-            static std::unordered_set<u64> logged_vp;
-            const u64 k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
-                          (u64(std::bit_cast<u32>(viewport.width)) << 12) ^
-                          (u64(std::bit_cast<u32>(viewport.height)) << 6) ^
-                          (u64(static_cast<u32>(regs.primitive_type)) << 3) ^
-                          (regs.IsClipDisabled() ? 2u : 0u) ^ (presents_upscaled ? 1u : 0u);
-            if (logged_vp.insert(k).second) {
-                LOG_INFO(Render_Vulkan,
-                         "Final viewport: cb0={:#x}, prim={}, clipDisabled={}, vp=({},{} "
-                         "{}x{}), scissor=({},{} {}x{}), voFit={}x{}, rtFit={}x{}, "
-                         "rtFitExtent={}x{}, outputUpscaled={}, presentsUpscaled={}",
-                         liverpool->regs.color_buffers[0].Address(),
-                         static_cast<u32>(regs.primitive_type), regs.IsClipDisabled(), viewport.x,
-                         viewport.y, viewport.width, viewport.height, vp_scsr.top_left_x,
-                         vp_scsr.top_left_y, vp_scsr.GetWidth(), vp_scsr.GetHeight(), vo_fit_x,
-                         vo_fit_y, rt_fit_x, rt_fit_y, rt_fit_width, rt_fit_height, output_upscaled,
-                         presents_upscaled);
-            }
-        }
     }
 
     if (viewports.empty()) {
