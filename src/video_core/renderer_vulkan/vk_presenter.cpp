@@ -462,6 +462,61 @@ static void SavePendingScreenshot(const ScreenshotReadback& readback) {
     }
 }
 
+void Presenter::DumpScaledSurfaces() {
+    const auto& screenshots_dir = Common::FS::GetUserPath(Common::FS::PathType::ScreenshotsDir);
+    std::filesystem::create_directories(screenshots_dir);
+    static std::atomic<u32> dump_sequence{0};
+    const u32 sequence = dump_sequence.fetch_add(1, std::memory_order_relaxed);
+
+    for (const auto& surface : VideoCore::GetScaledSurfaceRefs()) {
+        const auto image_id =
+            texture_cache.FindImageFromRange(surface.address, surface.size, false);
+        if (!image_id) {
+            continue;
+        }
+        auto& image = texture_cache.GetImage(image_id);
+        if (image.info.props.is_depth || image.info.props.is_block || image.info.num_samples > 1 ||
+            !image.backing) {
+            continue;
+        }
+        const u32 width = image.info.size.width;
+        const u32 height = image.info.size.height;
+        const u32 bytes_per_pixel = std::max(image.info.num_bits / 8u, 1u);
+        const u64 byte_size = static_cast<u64>(width) * static_cast<u64>(height) * bytes_per_pixel;
+        VideoCore::Buffer buffer{instance, 0, byte_size, VideoCore::MemoryType::HostCached};
+        const vk::BufferImageCopy copy_region = {
+            .bufferOffset = 0,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource = {.aspectMask = vk::ImageAspectFlagBits::eColor,
+                                 .mipLevel = 0,
+                                 .baseArrayLayer = 0,
+                                 .layerCount = 1},
+            .imageOffset = {0, 0, 0},
+            .imageExtent = {width, height, 1},
+        };
+        runtime.DownloadImage(&image, &buffer, std::span{&copy_region, 1});
+        if (buffer.mapped_data.size() < byte_size) {
+            continue;
+        }
+        std::vector<u8> rgba(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+        const u8* src = buffer.mapped_data.data();
+        for (size_t i = 0; i < static_cast<size_t>(width) * static_cast<size_t>(height); ++i) {
+            const u8* pixel = src + i * bytes_per_pixel;
+            rgba[i * 4 + 0] = pixel[0];
+            rgba[i * 4 + 1] = bytes_per_pixel > 1 ? pixel[1] : pixel[0];
+            rgba[i * 4 + 2] = bytes_per_pixel > 2 ? pixel[2] : pixel[0];
+            rgba[i * 4 + 3] = 255;
+        }
+        const auto path = screenshots_dir / fmt::format("scaled_{:03}_{:#x}_{}x{}.png", sequence,
+                                                        surface.address, width, height);
+        if (WritePng(path, rgba, width, height)) {
+            LOG_INFO(Render_Vulkan, "Dumped scaled surface {} ({}x{})", path.string(), width,
+                     height);
+        }
+    }
+}
+
 Presenter::Presenter(Frontend::WindowSDL& window_, AmdGpu::Liverpool* liverpool_)
     : window{window_}, liverpool{liverpool_},
       instance{window, EmulatorSettings.GetGpuId(), EmulatorSettings.IsVkValidationEnabled(),
@@ -732,6 +787,8 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
             .imageExtent = {readback.width, readback.height, 1},
         };
         runtime.DownloadImage(&image, &readback.buffer, std::span{&copy_region, 1});
+        // TEMPORARY DIAGNOSTIC: also dump every surface the internal resolution scaling enlarged.
+        DumpScaledSurfaces();
     }
 
     // Continue with host-side passes that draw the displayed (scaled) frame.

@@ -108,6 +108,8 @@ private:
 
     void SetExpectedGameSize(s32 width, s32 height);
 
+    void DumpScaledSurfaces();
+
 private:
     float expected_ratio{1920.0 / 1080.0f};
     u32 expected_frame_width{1920};

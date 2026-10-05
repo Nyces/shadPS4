@@ -80,6 +80,16 @@ bool IsScaledRange(VAddr address) {
     return false;
 }
 
+std::vector<ScaledSurfaceRef> GetScaledSurfaceRefs() {
+    std::scoped_lock lock{g_scaled_mutex};
+    std::vector<ScaledSurfaceRef> out;
+    out.reserve(g_scaled_ranges.size());
+    for (const auto& entry : g_scaled_ranges) {
+        out.push_back({entry.base, entry.size});
+    }
+    return out;
+}
+
 // Grow only surfaces that match the guest's screen resolution. The whole layout grows together with
 // the host extent: size, pitch, mip sizes, guest_size and stencil_size stay in lockstep so the
 // memory tracker, the page watchers and the upload/download bounds describe the very same surface
