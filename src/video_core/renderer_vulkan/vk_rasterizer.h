@@ -89,7 +89,8 @@ public:
 private:
     void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
     float PresentationScale() const;
-    void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const;
+    void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,
+                                bool samples_upscaled = false) const;
     void PrepareRenderState(const GraphicsPipeline* pipeline);
     RenderState BeginRendering(const GraphicsPipeline* pipeline);
     void Resolve();

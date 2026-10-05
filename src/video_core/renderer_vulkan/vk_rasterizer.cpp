@@ -235,7 +235,8 @@ float Rasterizer::PresentationScale() const {
 // for that window, so growing it crops its contents into a corner.
 static constexpr bool kUpscaleOffscreenTargets = true;
 
-void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc) const {
+void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,
+                                        bool samples_upscaled) const {
     if (!kUpscaleOffscreenTargets) {
         return;
     }
@@ -297,6 +298,18 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
         desc.info.size.height != guest_window_height) {
         return;
     }
+    // A pass that samples a target already rendered at the presentation scale is a stage of
+    // the post-process chain downstream of the scene: the 4K scene reaches it as input, so
+    // its own target belongs on the same scale or the stage would resolve the 4K scene into
+    // a window-sized image that the next stage has to stretch again, which is what left the
+    // composition and the final present at the game's window. Its geometry still follows:
+    // the clip-disabled blits get their quad scaled through the target ratio, and the passes
+    // the resolution patch converted already describe the enlarged surface themselves.
+    if (samples_upscaled) {
+        desc.info.size.width = vo_ext.width;
+        desc.info.size.height = vo_ext.height;
+        return;
+    }
     // The remaining window-sized clip-enabled targets divide into two kinds. The resolution
     // patch converted the scene, so those passes describe the enlarged surface in their
     // viewport registers: a viewport that already reaches the whole presentation-scaled
@@ -352,6 +365,11 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
+    // Whether this pass reads a target the scene already enlarged. A stage that consumes the
+    // 4K scene belongs on the same scale; this is also the signal that separates the
+    // post-process chain from the interface layers drawn over it, which sample their own
+    // textures and must stay at the size the game laid them out for.
+    const bool samples_upscaled = SamplesUpscaledTarget(pipeline, upscaled_targets);
     for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         const auto& col_buf = regs.color_buffers[cb];
@@ -389,7 +407,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 // also follows the extent of a target an earlier pass already enlarged, so the
                 // clip-disabled background layers land on the scene surface instead of the
                 // smaller image cached next to it.
-                ApplyPresentationScale(desc);
+                ApplyPresentationScale(desc, samples_upscaled);
             } else if (const auto up = upscaled_targets.find(desc.info.guest_address);
                        up != upscaled_targets.end() && desc.info.size.width == guest_window_width &&
                        desc.info.size.height == guest_window_height) {
