@@ -563,14 +563,17 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
         }
     }
 
-    // A target the presentation scale rendered larger leaves a second, window-sized image over
-    // the same allocation: the first pass to describe the address at the game's window created
-    // it, and the enlarged render goes into the image the descriptor was scaled to. Reading or
-    // writing the small view then touches a buffer nothing else uses, which is what takes the
-    // background and the glow out of the frame once the composition joins the scale. Prefer the
-    // larger image whenever it shares the allocation, the guest size and the format, whatever
-    // the binding is and whether it is a depth surface or a colour one.
-    {
+    // A sampler read that names a target the presentation scale rendered larger has to be served
+    // from the enlarged image: the first pass to describe the address at the game's window
+    // created a second, window-sized image next to it, and sampling the small view reads a
+    // buffer nothing wrote, which is what takes the background and the glow out of the frame
+    // once the composition joins the scale. Only sampler reads are redirected. A render target
+    // or a depth attachment has to keep the size the pass describes: the render area is the
+    // intersection of all the attachments, so pointing one of them at a larger image shrinks
+    // the pass back to the game's window and clears and renders only the corner of the enlarged
+    // surface, which leaves the depth outside that corner at its cleared value and depth-tests
+    // away everything drawn there afterwards.
+    if (desc.type == BindingType::Texture) {
         ImageId enlarged_id{};
         for (const auto& cache_id : image_ids) {
             const auto& cache_image = slot_images[cache_id];
