@@ -334,17 +334,16 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
                      desc.info.guest_address, desc.info.size.width, desc.info.size.height);
         }
     }
-    // A clip-disabled pass is a full-screen blit: its coverage lives in the push constants, not
-    // in the viewport registers, so no viewport can say whether it reaches the enlarged surface.
-    // The target ratio scales exactly that quad, so such a pass joins the scale as soon as its
-    // target does; leaving it out keeps its target at the window size while the converted passes
-    // write the enlarged one, which splits one allocation over two images and leaves the work
-    // this pass did only in the corner of the enlarged surface.
-    if (liverpool->regs.IsClipDisabled()) {
-        desc.info.size.width = vo_ext.width;
-        desc.info.size.height = vo_ext.height;
-        return;
-    }
+    // A clip-disabled pass whose target is not already part of the enlarged chain keeps the size
+    // the game chose. Its coverage lives in the push constants so the ratio would scale that
+    // quad correctly, but one allocation here is often shared by passes of several kinds: a 3D
+    // effect surface with a depth attachment of its own, plus later two-dimensional stages that
+    // lay it out for the game's window. Growing the target of one of them leaves the rest at the
+    // window size, and the render area of every pass is the intersection of all its attachments,
+    // so the depth outside the smaller attachment is never cleared and depth-tests away
+    // everything drawn there afterwards. The chain stays coherent only when this rule already
+    // decided that the whole stage belongs to the scale, which is what the sample-fed branch
+    // above reports.
     // The remaining window-sized clip-enabled targets divide into two kinds. The resolution
     // patch converted the scene, so those passes describe the enlarged surface in their
     // viewport registers: a viewport that already reaches the whole presentation-scaled

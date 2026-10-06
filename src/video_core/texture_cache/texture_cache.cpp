@@ -544,7 +544,8 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
     // the composition target is enlarged, and neither is visible from the render side.
     if (info.guest_address == 0x20acc0000ull || info.guest_address == 0x209340000ull ||
         info.guest_address == 0x207140000ull || info.guest_address == 0x208240000ull ||
-        info.guest_address == 0x20f0c0000ull || info.guest_address == 0x216bc0000ull) {
+        info.guest_address == 0x20f0c0000ull || info.guest_address == 0x216bc0000ull ||
+        info.guest_address == 0x2162c0000ull) {
         static std::unordered_map<u64, u32> hits;
         const u32 count = ++hits[u64(info.guest_address)];
         if (count % 4000 == 1) {
