@@ -359,11 +359,14 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     // The remaining window-sized clip-enabled targets divide into two kinds. The resolution
     // patch converted the scene, so those passes describe the enlarged surface in their
     // viewport registers: a viewport that already reaches the whole presentation-scaled
-    // surface is that signature. The 2D layers and the glow chain were left alone and their
-    // viewport still reaches only a fraction of it. They were correct before the scene grew,
-    // and growing them without also converting their geometry is what cropped the background,
-    // the light pillars and the glow sticks, so enlarge only a pass whose viewport spans the
-    // enlarged surface on both axes.
+    // surface is that signature. The background light and the glow chain were left alone and
+    // their viewport still reaches the game's window instead of the surface. They are full
+    // frame layers laid out for that window (the composition layers use 0.8 of it), so they
+    // belong on the presentation scale like the scene: left at the window size their content
+    // reaches the composition as a 1080p image and lands in the corner of the 4K frame,
+    // while the interface sprites cover a small part of the window and keep the layout the
+    // game chose. Enlarge both kinds, and let the ratio the enlargement records scale the
+    // geometry of the layers that do not already describe the surface.
     const auto& vp = liverpool->regs.viewports[0];
     if (!liverpool->regs.viewport_control.xscale_enable ||
         !liverpool->regs.viewport_control.yscale_enable) {
@@ -371,7 +374,9 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
     }
     const bool spans_x = std::abs(vp.xscale) * 2.0f >= float(vo_ext.width) * 0.999f;
     const bool spans_y = std::abs(vp.yscale) * 2.0f >= float(vo_ext.height) * 0.999f;
-    if (!spans_x || !spans_y) {
+    const bool covers_x = std::abs(vp.xscale) * 2.0f >= float(guest_window_width) * 0.7f;
+    const bool covers_y = std::abs(vp.yscale) * 2.0f >= float(guest_window_height) * 0.7f;
+    if (!((spans_x && spans_y) || (covers_x && covers_y))) {
         return;
     }
     desc.info.size.width = vo_ext.width;
@@ -467,6 +472,27 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                 // second one over the same memory.
                 desc.info.size.width = up->second.first;
                 desc.info.size.height = up->second.second;
+            } else if (const auto vo_ext = liverpool->GetVideoOutExtent();
+                       vo_ext.Valid() && desc.info.size.width == guest_window_width &&
+                       desc.info.size.height == guest_window_height && !regs.IsClipDisabled()) {
+                // The background light surface is written by a pass that reads its own target,
+                // so the shared rule never enlarges it: that rule is skipped for an in-place
+                // blit. It is still a full frame layer laid out for the game's window (its
+                // viewport covers most of it), and left at the window size it reaches the
+                // composition as a 1080p image that lands in the corner of the 4K frame.
+                // Enlarge it here and let the ratio below scale the geometry of the
+                // self-sampling pass, so the layer and the composition that reads it stay on
+                // one enlarged image. The small sprites cover a small part of the window and
+                // keep the layout the game chose.
+                const auto& vp_self = regs.viewports[0];
+                const bool covers_x =
+                    std::abs(vp_self.xscale) * 2.0f >= float(guest_window_width) * 0.7f;
+                const bool covers_y =
+                    std::abs(vp_self.yscale) * 2.0f >= float(guest_window_height) * 0.7f;
+                if (covers_x && covers_y) {
+                    desc.info.size.width = vo_ext.width;
+                    desc.info.size.height = vo_ext.height;
+                }
             }
             if (desc.info.size.width != sharp_width) {
                 rt_fit_x = float(desc.info.size.width) / float(sharp_width);
