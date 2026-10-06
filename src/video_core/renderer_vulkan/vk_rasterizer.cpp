@@ -2224,6 +2224,7 @@ void Rasterizer::UpdateViewportScissorState() const {
                           (u64(std::bit_cast<u32>(viewport.width)) << 12) ^
                           (u64(std::bit_cast<u32>(viewport.height)) << 6) ^
                           (u64(static_cast<u32>(regs.primitive_type)) << 3) ^
+                          (u64(vp_scsr.GetWidth()) << 1) ^ (u64(rt_fit_width) << 34) ^
                           (regs.IsClipDisabled() ? 2u : 0u) ^ (presents_upscaled ? 1u : 0u);
             if (logged_vp.insert(k).second) {
                 LOG_INFO(Render_Vulkan,
