@@ -839,7 +839,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     // passes that span the enlarged surface and the ones that stay in its corner.
     if (const u64 layer_vs = vs_info.pgm_hash;
         layer_vs == 0x64cd676aull || layer_vs == 0xd8915e1ull || layer_vs == 0xb3b7b928ull ||
-        layer_vs == 0xec3717aull || layer_vs == 0x788fc913ull || layer_vs == 0xb6a13818ull) {
+        layer_vs == 0xec3717aull || layer_vs == 0x788fc913ull || layer_vs == 0xb6a13818ull ||
+        layer_vs == 0x83b353faull) {
         static std::unordered_set<u64> logged_layer_ud;
         const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 20) ^ layer_vs;
         if (logged_layer_ud.insert(key).second) {
@@ -865,6 +866,50 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                          "f=({:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g})",
                          liverpool->regs.color_buffers[0].Address(), layer_vs, i, i + 1, ptr,
                          vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+            }
+        }
+    }
+
+    // TEMPORARY DIAGNOSTIC: the composite programs are what place the light on the frame, so dump
+    // the fragment programs' user data the same way. A fraction or size that still describes the
+    // game's window is what would keep the layer in the corner of the enlarged frame.
+    {
+        const auto stages = pipeline->GetStages();
+        const u32 fs_index = u32(Shader::LogicalStage::Fragment);
+        if (fs_index < stages.size() && stages[fs_index] != nullptr) {
+            const auto& fs_info = *stages[fs_index];
+            if (const u64 fs_hash = fs_info.pgm_hash;
+                fs_hash == 0xe1c15b68ull || fs_hash == 0x64063713ull || fs_hash == 0x9c561cc1ull ||
+                fs_hash == 0x21ed1ef9ull || fs_hash == 0x1fcd0823ull || fs_hash == 0x3de5e98full ||
+                fs_hash == 0xee712d0ull || fs_hash == 0xeeca4b6bull) {
+                static std::unordered_set<u64> logged_fs_ud;
+                const u64 key =
+                    (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 20) ^ fs_hash;
+                if (logged_fs_ud.insert(key).second) {
+                    const auto& ud = fs_info.user_data;
+                    const u32 n = std::min<u32>(u32(ud.size()), 16u);
+                    std::string sgprs;
+                    for (u32 i = 0; i < n; ++i) {
+                        sgprs += fmt::format("{:08x}/{:.6g} ", ud[i], std::bit_cast<float>(ud[i]));
+                    }
+                    LOG_INFO(
+                        Render_Vulkan, "Layer user data: cb0={:#x}, fs={:#x}, count={}, sgprs={}",
+                        liverpool->regs.color_buffers[0].Address(), fs_hash, u32(ud.size()), sgprs);
+                    for (u32 i = 0; i + 1 < n; i += 2) {
+                        const VAddr ptr = VAddr((u64(ud[i + 1]) << 32) | u64(ud[i]));
+                        if (ptr == 0 || !memory->IsValidMapping(ptr, 256)) {
+                            continue;
+                        }
+                        float vals[16]{};
+                        memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(vals), sizeof(vals));
+                        LOG_INFO(Render_Vulkan,
+                                 "Layer user data mem: cb0={:#x}, fs={:#x}, sgpr[{}..{}]={:#x}, "
+                                 "f=({:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g})",
+                                 liverpool->regs.color_buffers[0].Address(), fs_hash, i, i + 1, ptr,
+                                 vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6],
+                                 vals[7]);
+                    }
+                }
             }
         }
     }
