@@ -831,6 +831,42 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
     }
 
+    // TEMPORARY DIAGNOSTIC: the background light and the composition layers share their vertex
+    // programs with the scene, so the difference that keeps a layer at the game's window size is
+    // in the constants those programs read, not in the program. Dump the raw vertex user data and
+    // the contents of every one of its entries that resolves to a mapped address, so the screen
+    // size a layer converts its positions with can be read directly and compared between the
+    // passes that span the enlarged surface and the ones that stay in its corner.
+    if (const u64 layer_vs = vs_info.pgm_hash;
+        layer_vs == 0x64cd676aull || layer_vs == 0xd8915e1ull || layer_vs == 0xb3b7b928ull ||
+        layer_vs == 0xec3717aull || layer_vs == 0x788fc913ull || layer_vs == 0xb6a13818ull) {
+        static std::unordered_set<u64> logged_layer_ud;
+        const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 20) ^ layer_vs;
+        if (logged_layer_ud.insert(key).second) {
+            const auto& ud = vs_info.user_data;
+            const u32 n = std::min<u32>(u32(ud.size()), 16u);
+            std::string sgprs;
+            for (u32 i = 0; i < n; ++i) {
+                sgprs += fmt::format("{:08x}/{:.6g} ", ud[i], std::bit_cast<float>(ud[i]));
+            }
+            LOG_INFO(Render_Vulkan, "Layer user data: cb0={:#x}, vs={:#x}, count={}, sgprs={}",
+                     liverpool->regs.color_buffers[0].Address(), layer_vs, u32(ud.size()), sgprs);
+            for (u32 i = 0; i < n; ++i) {
+                const VAddr ptr = VAddr(ud[i]);
+                if (ptr == 0 || !memory->IsValidMapping(ptr, 128)) {
+                    continue;
+                }
+                float vals[32]{};
+                memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(vals), sizeof(vals));
+                LOG_INFO(Render_Vulkan,
+                         "Layer user data mem: cb0={:#x}, vs={:#x}, sgpr[{}]={:#x}, "
+                         "f=({:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g})",
+                         liverpool->regs.color_buffers[0].Address(), layer_vs, i, ptr, vals[0],
+                         vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+            }
+        }
+    }
+
     const auto cmdbuf = scheduler.CommandBuffer();
     cmdbuf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->Handle());
 
