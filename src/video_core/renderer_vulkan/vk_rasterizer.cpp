@@ -472,8 +472,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             if (upscaled_targets.contains(desc.info.guest_address) &&
                 desc.info.size.width == guest_window_width) {
                 static std::unordered_set<u64> logged_unscaled_writer;
-                const u64 vs_hash = pipeline->GetStage(LogicalStage::Vertex).pgm_hash;
-                const u64 fs_hash = pipeline->GetStage(LogicalStage::Fragment).pgm_hash;
+                const u64 vs_hash = pipeline->GetStage(Shader::LogicalStage::Vertex).pgm_hash;
+                const u64 fs_hash = pipeline->GetStage(Shader::LogicalStage::Fragment).pgm_hash;
                 const u64 writer_key =
                     (u64(desc.info.guest_address) << 32) ^ (vs_hash << 8) ^ fs_hash;
                 if (logged_unscaled_writer.insert(writer_key).second) {
