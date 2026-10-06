@@ -306,6 +306,18 @@ void Rasterizer::ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc
         desc.info.size.height != guest_window_height) {
         return;
     }
+    // A pass whose depth attachment already belongs to the enlarged chain renders at the
+    // presentation scale whatever its own viewport says. The render area is the intersection of
+    // all the attachments, so a colour target left at the window size would shrink the pass back
+    // and clear and render only the corner of the enlarged depth, while the rest of it keeps its
+    // cleared value and depth-tests away everything drawn into it afterwards. The depth is the
+    // resource every stage of the chain shares, so once one stage grows it, the stages that test
+    // against it have to grow with it.
+    if (upscaled_targets.contains(liverpool->regs.depth_buffer.DepthAddress())) {
+        desc.info.size.width = vo_ext.width;
+        desc.info.size.height = vo_ext.height;
+        return;
+    }
     // A pass that samples a target already rendered at the presentation scale is a stage of
     // the post-process chain downstream of the scene: the 4K scene reaches it as input, so
     // its own target belongs on the same scale or the stage would resolve the 4K scene into
@@ -596,13 +608,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         auto& [image_id, desc] = db_desc;
         std::construct_at(&desc, regs.depth_buffer, regs.depth_view, regs.depth_control,
                           htile_address, hint);
-        if (rt_fit_x > 1.001f) {
-            // Follow the enlarged color target, otherwise the smaller depth attachment
-            // would shrink the framebuffer back and crop the pass. As with the color
-            // target, only the host extent grows: the guest layout has to keep
-            // describing the allocation the game actually wrote.
+        // The depth is shared by every stage of the chain and has to keep one extent: follow a
+        // depth allocation an earlier pass already grew, and remember the one grown here, so the
+        // stages that come later land on the same image instead of a second one over the same
+        // memory that nothing clears. Only the host extent changes; the guest layout keeps
+        // describing the allocation the game actually wrote.
+        if (const auto up = upscaled_targets.find(desc.info.guest_address);
+            up != upscaled_targets.end()) {
+            desc.info.size.width = up->second.first;
+            desc.info.size.height = up->second.second;
+        } else if (rt_fit_x > 1.001f) {
             desc.info.size.width = u32(desc.info.size.width * rt_fit_x);
             desc.info.size.height = u32(desc.info.size.height * rt_fit_y);
+            upscaled_targets[desc.info.guest_address] = {desc.info.size.width,
+                                                         desc.info.size.height};
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
