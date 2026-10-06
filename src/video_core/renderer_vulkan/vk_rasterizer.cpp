@@ -851,18 +851,20 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
             }
             LOG_INFO(Render_Vulkan, "Layer user data: cb0={:#x}, vs={:#x}, count={}, sgprs={}",
                      liverpool->regs.color_buffers[0].Address(), layer_vs, u32(ud.size()), sgprs);
-            for (u32 i = 0; i < n; ++i) {
-                const VAddr ptr = VAddr(ud[i]);
-                if (ptr == 0 || !memory->IsValidMapping(ptr, 128)) {
+            for (u32 i = 0; i + 1 < n; i += 2) {
+                // A user data pointer is a 64-bit address split over two consecutive entries,
+                // low dword first, so it has to be reassembled before it can be read.
+                const VAddr ptr = VAddr((u64(ud[i + 1]) << 32) | u64(ud[i]));
+                if (ptr == 0 || !memory->IsValidMapping(ptr, 256)) {
                     continue;
                 }
-                float vals[32]{};
+                float vals[16]{};
                 memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(vals), sizeof(vals));
                 LOG_INFO(Render_Vulkan,
-                         "Layer user data mem: cb0={:#x}, vs={:#x}, sgpr[{}]={:#x}, "
+                         "Layer user data mem: cb0={:#x}, vs={:#x}, sgpr[{}..{}]={:#x}, "
                          "f=({:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g})",
-                         liverpool->regs.color_buffers[0].Address(), layer_vs, i, ptr, vals[0],
-                         vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+                         liverpool->regs.color_buffers[0].Address(), layer_vs, i, i + 1, ptr,
+                         vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
             }
         }
     }
