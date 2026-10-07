@@ -930,11 +930,10 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     // be found.
     if (liverpool->regs.IsClipDisabled() &&
         liverpool->regs.color_buffers[0].Address() == 0x20f0c0000ull) {
-        const Shader* clip_fs = nullptr;
         const auto clip_stages = pipeline->GetStages();
-        if (u32(Shader::LogicalStage::Fragment) < clip_stages.size()) {
-            clip_fs = clip_stages[u32(Shader::LogicalStage::Fragment)];
-        }
+        const u32 clip_fs_index = u32(Shader::LogicalStage::Fragment);
+        const auto* clip_fs =
+            clip_fs_index < clip_stages.size() ? clip_stages[clip_fs_index] : nullptr;
         const u64 clip_fs_hash = clip_fs != nullptr ? clip_fs->pgm_hash : 0ull;
         static std::unordered_set<u64> logged_clip_layer;
         const u64 clip_key = (u64(vs_info.pgm_hash) << 8) ^ clip_fs_hash;
@@ -945,7 +944,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      liverpool->regs.color_buffers[0].Address(), vs_info.pgm_hash, clip_fs_hash,
                      static_cast<u32>(liverpool->regs.primitive_type), liverpool->regs.num_indices,
                      liverpool->regs.num_instances.NumInstances());
-            const auto dump_user_data = [&](const Shader* sh, const char* tag) {
+            const auto dump_user_data = [&](const auto* sh, const char* tag) {
                 if (sh == nullptr) {
                     return;
                 }
