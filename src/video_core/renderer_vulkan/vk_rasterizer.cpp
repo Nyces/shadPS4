@@ -878,6 +878,51 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
     }
 
+    // TEMPORARY DIAGNOSTIC: read the sprite batches' vertex data back. Their viewport reaches the
+    // presentation scale, so if the sprites still land in the corner their positions are what still
+    // describes the game's window. The buffers come from the fetch shader's attributes.
+    if (const u64 batch_vs = vs_info.pgm_hash;
+        batch_vs == 0x2d1f9f75ull || batch_vs == 0x406058cbull || batch_vs == 0x105b8d9full ||
+        batch_vs == 0x206c135bull || batch_vs == 0x5f49d3d1ull) {
+        const auto& fetch = pipeline->GetFetchShader();
+        if (fetch && !fetch->attributes.empty()) {
+            static std::unordered_set<u64> logged_batch_vb;
+            const VAddr first_vb = fetch->attributes[0].GetSharp(vs_info).base_address;
+            const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 24) ^
+                            (batch_vs << 4) ^ u64(first_vb & 0xFull);
+            if (logged_batch_vb.insert(key).second) {
+                u32 index = 0;
+                for (const auto& attrib : fetch->attributes) {
+                    const auto buffer = attrib.GetSharp(vs_info);
+                    const VAddr base = buffer.base_address;
+                    LOG_INFO(Render_Vulkan,
+                             "Batch vertex buffer: cb0={:#x}, vs={:#x}, attr={}, vb={:#x}, "
+                             "stride={}, size={}",
+                             liverpool->regs.color_buffers[0].Address(), batch_vs, index, base,
+                             buffer.GetStride(), u64(buffer.GetSize()));
+                    if (base != 0 && memory->IsValidMapping(base, 256)) {
+                        u32 words[64]{};
+                        memory->CopySparseMemory(base, reinterpret_cast<u8*>(words), sizeof(words));
+                        for (u32 line = 0; line < 4; ++line) {
+                            std::string hex;
+                            for (u32 j = 0; j < 16; ++j) {
+                                hex += fmt::format("{:08x} ", words[line * 16 + j]);
+                            }
+                            LOG_INFO(
+                                Render_Vulkan,
+                                "Batch vertex data: cb0={:#x}, vs={:#x}, attr={}, dw[{}..{}]={}",
+                                liverpool->regs.color_buffers[0].Address(), batch_vs, index,
+                                line * 16, line * 16 + 15, hex);
+                        }
+                    }
+                    if (++index >= 4) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // TEMPORARY DIAGNOSTIC: the background light and the composition layers share their vertex
     // programs with the scene, so the difference that keeps a layer at the game's window size is
     // in the constants those programs read, not in the program. Dump the raw vertex user data and
