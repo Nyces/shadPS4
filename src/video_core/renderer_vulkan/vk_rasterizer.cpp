@@ -923,6 +923,96 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
     }
 
+    // TEMPORARY DIAGNOSTIC: the light target also receives a clip-disabled pass. It draws from
+    // screen-space coordinates, so its extent comes from a constant the program reads rather than
+    // from the viewport, and the viewport rule cannot reach it. Dump its programs, the constants
+    // they read and its vertex data, so the screen size that still describes the game's window can
+    // be found.
+    if (liverpool->regs.IsClipDisabled() &&
+        liverpool->regs.color_buffers[0].Address() == 0x20f0c0000ull) {
+        const Shader* clip_fs = nullptr;
+        const auto clip_stages = pipeline->GetStages();
+        if (u32(Shader::LogicalStage::Fragment) < clip_stages.size()) {
+            clip_fs = clip_stages[u32(Shader::LogicalStage::Fragment)];
+        }
+        const u64 clip_fs_hash = clip_fs != nullptr ? clip_fs->pgm_hash : 0ull;
+        static std::unordered_set<u64> logged_clip_layer;
+        const u64 clip_key = (u64(vs_info.pgm_hash) << 8) ^ clip_fs_hash;
+        if (logged_clip_layer.insert(clip_key).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Clip layer: cb0={:#x}, vs={:#x}, fs={:#x}, prim={}, numIndices={}, "
+                     "numInstances={}",
+                     liverpool->regs.color_buffers[0].Address(), vs_info.pgm_hash, clip_fs_hash,
+                     static_cast<u32>(liverpool->regs.primitive_type), liverpool->regs.num_indices,
+                     liverpool->regs.num_instances.NumInstances());
+            const auto dump_user_data = [&](const Shader* sh, const char* tag) {
+                if (sh == nullptr) {
+                    return;
+                }
+                const auto& ud = sh->user_data;
+                const u32 n = std::min<u32>(u32(ud.size()), 16u);
+                std::string sgprs;
+                for (u32 i = 0; i < n; ++i) {
+                    sgprs += fmt::format("{:08x}/{:.6g} ", ud[i], std::bit_cast<float>(ud[i]));
+                }
+                LOG_INFO(Render_Vulkan, "Clip layer ud: cb0={:#x}, {}={:#x}, count={}, sgprs={}",
+                         liverpool->regs.color_buffers[0].Address(), tag, sh->pgm_hash,
+                         u32(ud.size()), sgprs);
+                for (u32 i = 0; i + 1 < n; i += 2) {
+                    const VAddr ptr = VAddr((u64(ud[i + 1]) << 32) | u64(ud[i]));
+                    if (ptr == 0 || !memory->IsValidMapping(ptr, 256)) {
+                        continue;
+                    }
+                    u32 words[64]{};
+                    memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(words), sizeof(words));
+                    for (u32 line = 0; line < 4; ++line) {
+                        std::string hex;
+                        for (u32 j = 0; j < 16; ++j) {
+                            hex += fmt::format("{:08x} ", words[line * 16 + j]);
+                        }
+                        LOG_INFO(Render_Vulkan,
+                                 "Clip layer cb: cb0={:#x}, {}={:#x}, sgpr[{}..{}]={:#x}, "
+                                 "dw[{}..{}]={}",
+                                 liverpool->regs.color_buffers[0].Address(), tag, sh->pgm_hash, i,
+                                 i + 1, ptr, line * 16, line * 16 + 15, hex);
+                    }
+                }
+            };
+            dump_user_data(&vs_info, "vs");
+            dump_user_data(clip_fs, "fs");
+            const auto& clip_fetch = pipeline->GetFetchShader();
+            if (clip_fetch && !clip_fetch->attributes.empty()) {
+                u32 index = 0;
+                for (const auto& attrib : clip_fetch->attributes) {
+                    const auto buffer = attrib.GetSharp(vs_info);
+                    const VAddr base = buffer.base_address;
+                    LOG_INFO(Render_Vulkan,
+                             "Clip layer vb: cb0={:#x}, vs={:#x}, attr={}, vb={:#x}, stride={}, "
+                             "size={}",
+                             liverpool->regs.color_buffers[0].Address(), vs_info.pgm_hash, index,
+                             base, buffer.GetStride(), u64(buffer.GetSize()));
+                    if (base != 0 && memory->IsValidMapping(base, 256)) {
+                        u32 words[64]{};
+                        memory->CopySparseMemory(base, reinterpret_cast<u8*>(words), sizeof(words));
+                        for (u32 line = 0; line < 4; ++line) {
+                            std::string hex;
+                            for (u32 j = 0; j < 16; ++j) {
+                                hex += fmt::format("{:08x} ", words[line * 16 + j]);
+                            }
+                            LOG_INFO(Render_Vulkan,
+                                     "Clip layer vtx: cb0={:#x}, vs={:#x}, attr={}, dw[{}..{}]={}",
+                                     liverpool->regs.color_buffers[0].Address(), vs_info.pgm_hash,
+                                     index, line * 16, line * 16 + 15, hex);
+                        }
+                    }
+                    if (++index >= 4) {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     // TEMPORARY DIAGNOSTIC: the background light and the composition layers share their vertex
     // programs with the scene, so the difference that keeps a layer at the game's window size is
     // in the constants those programs read, not in the program. Dump the raw vertex user data and
