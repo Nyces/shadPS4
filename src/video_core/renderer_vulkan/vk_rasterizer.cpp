@@ -882,6 +882,45 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
     }
 
+    // TEMPORARY DIAGNOSTIC: read the light layers' vertex data back. They share the scene's
+    // projection, so if the light still reaches the frame at the game's window size, its vertex
+    // positions are what still describes that window. The vertex descriptor is the second user
+    // data pointer, and its first word is the buffer address.
+    if (const u64 light_vs = vs_info.pgm_hash;
+        light_vs == 0x64cd676aull || light_vs == 0xd8915e1ull || light_vs == 0xb3b7b928ull) {
+        static std::unordered_set<u64> logged_vtx;
+        const u64 vtx_key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 20) ^ light_vs;
+        if (logged_vtx.insert(vtx_key).second && vs_info.user_data.size() > 3) {
+            const VAddr vsharp_block =
+                VAddr((u64(vs_info.user_data[3]) << 32) | u64(vs_info.user_data[2]));
+            if (vsharp_block != 0 && memory->IsValidMapping(vsharp_block, 16)) {
+                u32 vsharp[4]{};
+                memory->CopySparseMemory(vsharp_block, reinterpret_cast<u8*>(vsharp),
+                                         sizeof(vsharp));
+                const VAddr vb = VAddr((u64(vsharp[1] & 0xFFFFu) << 32) | u64(vsharp[0]));
+                LOG_INFO(Render_Vulkan,
+                         "Light vertex buffer: cb0={:#x}, vs={:#x}, vsharp={:#x}, vb={:#x}, "
+                         "stride={}, count={}, fmt={:#x}",
+                         liverpool->regs.color_buffers[0].Address(), light_vs, vsharp_block, vb,
+                         (vsharp[1] >> 16) & 0x3FFFu, vsharp[2], vsharp[3]);
+                if (vb != 0 && memory->IsValidMapping(vb, 256)) {
+                    u32 words[64]{};
+                    memory->CopySparseMemory(vb, reinterpret_cast<u8*>(words), sizeof(words));
+                    for (u32 line = 0; line < 4; ++line) {
+                        std::string hex;
+                        for (u32 j = 0; j < 16; ++j) {
+                            hex += fmt::format("{:08x} ", words[line * 16 + j]);
+                        }
+                        LOG_INFO(Render_Vulkan,
+                                 "Light vertex data: cb0={:#x}, vs={:#x}, dw[{}..{}]={}",
+                                 liverpool->regs.color_buffers[0].Address(), light_vs, line * 16,
+                                 line * 16 + 15, hex);
+                    }
+                }
+            }
+        }
+    }
+
     // TEMPORARY DIAGNOSTIC: the composite programs are what place the light on the frame, so dump
     // the fragment programs' user data the same way. A fraction or size that still describes the
     // game's window is what would keep the layer in the corner of the enlarged frame.
