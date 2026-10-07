@@ -2609,25 +2609,6 @@ void Rasterizer::UpdateViewportScissorState() const {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
                 }
-                // TEMPORARY: the light layer's own pass describes a viewport narrower than the
-                // target it renders into, so its content only reaches part of the enlarged target
-                // and the composition shows a layer that never grew. Stretch that pass to its
-                // target and see whether the layer then fills the frame.
-                if (liverpool->regs.color_buffers[0].Address() == 0x20f0c0000ull &&
-                    rt_fit_width > 0 && rt_fit_height > 0) {
-                    const float target_w = float(rt_fit_width);
-                    const float target_h = float(rt_fit_height);
-                    if (viewport.width > 0.0f && viewport.width < target_w) {
-                        const float sx = target_w / viewport.width;
-                        viewport.x *= sx;
-                        viewport.width = target_w;
-                    }
-                    if (viewport.height != 0.0f && std::abs(viewport.height) < target_h) {
-                        const float sy = target_h / std::abs(viewport.height);
-                        viewport.y *= sy;
-                        viewport.height *= sy;
-                    }
-                }
                 // Report the raw register state of every distinct enlarged-target
                 // clip-enabled pass so the viewport values handed to Vulkan can be
                 // traced back to what the game actually wrote. The per-axis rule
