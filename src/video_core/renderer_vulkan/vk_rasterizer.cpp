@@ -819,15 +819,20 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 24) ^
                         (vs_hash << 4) ^ (ud0 & 0xFull);
         if (logged_consts.insert(key).second) {
-            float values[16]{};
+            u32 values[64]{};
             if (cb != 0 && memory->IsValidMapping(cb, sizeof(values))) {
                 memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
             }
-            LOG_INFO(Render_Vulkan,
-                     "Layer constants: cb0={:#x}, vs={:#x}, ud0={:#x}, ud1={:#x}, cb={:#x}, "
-                     "f=({:g},{:g},{:g},{:g},{:g},{:g},{:g},{:g})",
-                     liverpool->regs.color_buffers[0].Address(), vs_hash, ud0, ud1, cb, values[0],
-                     values[1], values[2], values[3], values[4], values[5], values[6], values[7]);
+            for (u32 line = 0; line < 4; ++line) {
+                std::string hex;
+                for (u32 j = 0; j < 16; ++j) {
+                    hex += fmt::format("{:08x} ", values[line * 16 + j]);
+                }
+                LOG_INFO(Render_Vulkan,
+                         "Layer constants: cb0={:#x}, vs={:#x}, cb={:#x}, dw[{}..{}]={}",
+                         liverpool->regs.color_buffers[0].Address(), vs_hash, cb, line * 16,
+                         line * 16 + 15, hex);
+            }
         }
     }
 
@@ -854,18 +859,25 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      liverpool->regs.color_buffers[0].Address(), layer_vs, u32(ud.size()), sgprs);
             for (u32 i = 0; i + 1 < n; i += 2) {
                 // A user data pointer is a 64-bit address split over two consecutive entries,
-                // low dword first, so it has to be reassembled before it can be read.
+                // low dword first, so it has to be reassembled before it can be read. Dump the
+                // whole block: the sprite transform and the projection live at offsets the first
+                // few words never reach.
                 const VAddr ptr = VAddr((u64(ud[i + 1]) << 32) | u64(ud[i]));
                 if (ptr == 0 || !memory->IsValidMapping(ptr, 256)) {
                     continue;
                 }
-                float vals[16]{};
-                memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(vals), sizeof(vals));
-                LOG_INFO(Render_Vulkan,
-                         "Layer user data mem: cb0={:#x}, vs={:#x}, sgpr[{}..{}]={:#x}, "
-                         "f=({:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g})",
-                         liverpool->regs.color_buffers[0].Address(), layer_vs, i, i + 1, ptr,
-                         vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7]);
+                u32 words[64]{};
+                memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(words), sizeof(words));
+                for (u32 line = 0; line < 4; ++line) {
+                    std::string hex;
+                    for (u32 j = 0; j < 16; ++j) {
+                        hex += fmt::format("{:08x} ", words[line * 16 + j]);
+                    }
+                    LOG_INFO(Render_Vulkan,
+                             "Layer CB: cb0={:#x}, vs={:#x}, sgpr[{}..{}]={:#x}, dw[{}..{}]={}",
+                             liverpool->regs.color_buffers[0].Address(), layer_vs, i, i + 1, ptr,
+                             line * 16, line * 16 + 15, hex);
+                }
             }
         }
     }
@@ -900,14 +912,19 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                         if (ptr == 0 || !memory->IsValidMapping(ptr, 256)) {
                             continue;
                         }
-                        float vals[16]{};
-                        memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(vals), sizeof(vals));
-                        LOG_INFO(Render_Vulkan,
-                                 "Layer user data mem: cb0={:#x}, fs={:#x}, sgpr[{}..{}]={:#x}, "
-                                 "f=({:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g},{:.6g})",
-                                 liverpool->regs.color_buffers[0].Address(), fs_hash, i, i + 1, ptr,
-                                 vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6],
-                                 vals[7]);
+                        u32 words[64]{};
+                        memory->CopySparseMemory(ptr, reinterpret_cast<u8*>(words), sizeof(words));
+                        for (u32 line = 0; line < 4; ++line) {
+                            std::string hex;
+                            for (u32 j = 0; j < 16; ++j) {
+                                hex += fmt::format("{:08x} ", words[line * 16 + j]);
+                            }
+                            LOG_INFO(Render_Vulkan,
+                                     "Layer CB: cb0={:#x}, fs={:#x}, sgpr[{}..{}]={:#x}, "
+                                     "dw[{}..{}]={}",
+                                     liverpool->regs.color_buffers[0].Address(), fs_hash, i, i + 1,
+                                     ptr, line * 16, line * 16 + 15, hex);
+                        }
                     }
                 }
             }
