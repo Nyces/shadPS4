@@ -1695,15 +1695,25 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
-            // TEMPORARY DIAGNOSTIC: read the light target back and report a coarse brightness grid,
-            // so the region its content actually covers can be seen without a capture. A small
-            // staging buffer holds one texel from the centre of each of the sixteen cells, which
-            // keeps the readback smaller than the guest allocation even when the host image was
-            // enlarged past it.
-            if (image.info.guest_address == 0x20f0c0000ull) {
-                static u32 logged_light_grid = 0;
-                ++logged_light_grid;
-                if (logged_light_grid % 200 == 1 && logged_light_grid <= 6000) {
+            // TEMPORARY DIAGNOSTIC: read the light and composition targets back and report a coarse
+            // brightness grid, so the region their content covers can be seen without a capture. A
+            // small staging buffer holds one texel from the centre of each of the sixteen cells,
+            // which keeps the readback smaller than the guest allocation even when the host image
+            // was enlarged past it.
+            if (image.info.guest_address == 0x20f0c0000ull ||
+                image.info.guest_address == 0x207140000ull ||
+                image.info.guest_address == 0x208240000ull) {
+                static u32 grid_hits[3]{};
+                static u32 grid_logs[3]{};
+                const u32 which = image.info.guest_address == 0x20f0c0000ull
+                                      ? 0u
+                                      : (image.info.guest_address == 0x207140000ull ? 1u : 2u);
+                ++grid_hits[which];
+                const bool enlarged = image.info.size.width >= 3840;
+                const bool sample_now = (enlarged && grid_logs[which] < 80) ||
+                                        (grid_hits[which] % 500 == 1 && grid_logs[which] < 300);
+                if (sample_now) {
+                    ++grid_logs[which];
                     const u32 grid_w = image.info.size.width;
                     const u32 grid_h = image.info.size.height;
                     const u32 bpp = image.info.num_bits / 8;
@@ -1776,8 +1786,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         }
                         grid += fmt::format("{:.3f} ", lum);
                     }
-                    LOG_INFO(Render_Vulkan, "Light grid: {}x{} bpp={} {}", grid_w, grid_h, bpp,
-                             grid);
+                    LOG_INFO(Render_Vulkan, "Layer grid: addr={:#x} {}x{} bpp={} {}",
+                             image.info.guest_address, grid_w, grid_h, bpp, grid);
                 }
             }
 
