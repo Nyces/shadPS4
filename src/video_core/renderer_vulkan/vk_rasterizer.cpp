@@ -836,6 +836,48 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         }
     }
 
+    // TEMPORARY DIAGNOSTIC: report the sprite batches' effective screen scale per distinct draw.
+    // Their pass registers are the same whether the batch is still laid out for the game's window
+    // or already on the presentation scale, so the per-draw transform in the constant buffer is
+    // what separates them: the first word of each matrix block is the scale it projects with, and
+    // the ratio the pass takes next is what tells whether that scale is still the window one.
+    if (const u64 batch_vs = vs_info.pgm_hash;
+        batch_vs == 0x2d1f9f75ull || batch_vs == 0x406058cbull || batch_vs == 0x105b8d9full ||
+        batch_vs == 0x206c135bull || batch_vs == 0x5f49d3d1ull) {
+        const u64 ud0 = vs_info.user_data.size() > 1 ? vs_info.user_data[0] : 0u;
+        const u64 ud1 = vs_info.user_data.size() > 1 ? vs_info.user_data[1] : 0u;
+        const VAddr cb = VAddr((ud1 << 32) | ud0);
+        float m0 = 0.0f;
+        float m16 = 0.0f;
+        float m32 = 0.0f;
+        float m48 = 0.0f;
+        if (cb != 0 && memory->IsValidMapping(cb, 256)) {
+            u32 values[64]{};
+            memory->CopySparseMemory(cb, reinterpret_cast<u8*>(values), sizeof(values));
+            m0 = std::bit_cast<float>(values[0]);
+            m16 = std::bit_cast<float>(values[16]);
+            m32 = std::bit_cast<float>(values[32]);
+            m48 = std::bit_cast<float>(values[48]);
+        }
+        const auto& vp = liverpool->regs.viewports[0];
+        static std::unordered_set<u64> logged_batch;
+        const u64 key = (batch_vs << 40) ^ (u64(std::bit_cast<u32>(vp.xscale)) << 16) ^
+                        (u64(std::bit_cast<u32>(vp.yscale)) & 0xFFFFull);
+        if (logged_batch.insert(key).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Batch draw: cb0={:#x}, vs={:#x}, prim={}, clipDisabled={}, numIndices={}, "
+                     "rawVP=({},{},{},{}), scissor={}x{}, voFit={}x{}, rtFit={}x{}, "
+                     "m0={:g} m16={:g} m32={:g} m48={:g}",
+                     liverpool->regs.color_buffers[0].Address(), batch_vs,
+                     static_cast<u32>(liverpool->regs.primitive_type),
+                     liverpool->regs.IsClipDisabled(), liverpool->regs.num_indices, vp.xoffset,
+                     vp.yoffset, vp.xscale, vp.yscale,
+                     AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x),
+                     AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y),
+                     vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y, m0, m16, m32, m48);
+        }
+    }
+
     // TEMPORARY DIAGNOSTIC: the background light and the composition layers share their vertex
     // programs with the scene, so the difference that keeps a layer at the game's window size is
     // in the constants those programs read, not in the program. Dump the raw vertex user data and
