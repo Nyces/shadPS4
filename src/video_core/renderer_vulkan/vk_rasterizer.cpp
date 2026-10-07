@@ -1695,6 +1695,92 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
+            // TEMPORARY DIAGNOSTIC: read the light target back and report a coarse brightness grid,
+            // so the region its content actually covers can be seen without a capture. A small
+            // staging buffer holds one texel from the centre of each of the sixteen cells, which
+            // keeps the readback smaller than the guest allocation even when the host image was
+            // enlarged past it.
+            if (image.info.guest_address == 0x20f0c0000ull) {
+                static bool logged_light_grid = false;
+                if (!logged_light_grid) {
+                    logged_light_grid = true;
+                    const u32 grid_w = image.info.size.width;
+                    const u32 grid_h = image.info.size.height;
+                    const u32 bpp = image.info.num_bits / 8;
+                    const u32 texel = 8;
+                    auto& download =
+                        buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::Download);
+                    const auto [data, base_offset] = download.Map(u64(16) * texel);
+                    download.Commit();
+                    scheduler.EndRendering();
+                    const auto cmdbuf = scheduler.CommandBuffer();
+                    image.Transit(vk::ImageLayout::eTransferSrcOptimal,
+                                  vk::AccessFlagBits2::eTransferRead, {});
+                    for (u32 gy = 0; gy < 4; ++gy) {
+                        for (u32 gx = 0; gx < 4; ++gx) {
+                            const u32 px = std::min(grid_w - 1, (gx * 2 + 1) * grid_w / 8);
+                            const u32 py = std::min(grid_h - 1, (gy * 2 + 1) * grid_h / 8);
+                            const vk::BufferImageCopy copy = {
+                                .bufferOffset = base_offset + u64(gy * 4 + gx) * texel,
+                                .bufferRowLength = 0,
+                                .bufferImageHeight = 0,
+                                .imageSubresource =
+                                    {
+                                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                                        .mipLevel = 0,
+                                        .baseArrayLayer = 0,
+                                        .layerCount = 1,
+                                    },
+                                .imageOffset = {s32(px), s32(py), 0},
+                                .imageExtent = {1, 1, 1},
+                            };
+                            cmdbuf.copyImageToBuffer(image.GetImage(),
+                                                     vk::ImageLayout::eTransferSrcOptimal,
+                                                     download.Handle(), copy);
+                        }
+                    }
+                    scheduler.Finish();
+                    const auto half = [](u16 h) -> float {
+                        const u32 s = (u32(h >> 15) & 1u) << 31;
+                        u32 e = u32(h >> 10) & 0x1Fu;
+                        u32 m = u32(h) & 0x3FFu;
+                        u32 bits = s;
+                        if (e == 0) {
+                            if (m != 0) {
+                                e = 113;
+                                while ((m & 0x400u) == 0) {
+                                    m <<= 1;
+                                    --e;
+                                }
+                                m &= 0x3FFu;
+                                bits = s | (e << 23) | (m << 13);
+                            }
+                        } else if (e == 31) {
+                            bits = s | 0x7F800000u | (m << 13);
+                        } else {
+                            bits = s | ((e + 112u) << 23) | (m << 13);
+                        }
+                        return std::bit_cast<float>(bits);
+                    };
+                    std::string grid;
+                    for (u32 i = 0; i < 16; ++i) {
+                        const u8* src = data + i * texel;
+                        float lum = 0.0f;
+                        if (bpp == 8) {
+                            const u16 r = u16(src[0]) | (u16(src[1]) << 8);
+                            const u16 g = u16(src[2]) | (u16(src[3]) << 8);
+                            const u16 b = u16(src[4]) | (u16(src[5]) << 8);
+                            lum = (half(r) + half(g) + half(b)) / 3.0f;
+                        } else if (bpp == 4) {
+                            lum = (float(src[0]) + float(src[1]) + float(src[2])) / 765.0f;
+                        }
+                        grid += fmt::format("{:.3f} ", lum);
+                    }
+                    LOG_INFO(Render_Vulkan, "Light grid: {}x{} bpp={} {}", grid_w, grid_h, bpp,
+                             grid);
+                }
+            }
+
             {
                 // Report every image a pass reads, alongside the output it feeds, in both
                 // the native and the upscaled run. The scene reaches the composition source
