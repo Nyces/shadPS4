@@ -1790,17 +1790,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // sixty-four cells, which keeps the readback smaller than the guest allocation even
             // when the host image was enlarged past it.
             if (image.info.guest_address == 0x20f0c0000ull ||
-                image.info.guest_address == 0x202040000ull ||
+                image.info.guest_address == 0x208240000ull ||
                 image.info.guest_address == 0x200040000ull) {
                 static u32 grid_hits[3]{};
                 static u32 grid_logs[3]{};
                 const u32 which = image.info.guest_address == 0x20f0c0000ull
                                       ? 0u
-                                      : (image.info.guest_address == 0x202040000ull ? 1u : 2u);
+                                      : (image.info.guest_address == 0x208240000ull ? 1u : 2u);
                 ++grid_hits[which];
                 const bool enlarged = image.info.size.width >= 3840;
-                const bool sample_now = (enlarged && grid_logs[which] < 80) ||
-                                        (grid_hits[which] % 500 == 1 && grid_logs[which] < 300);
+                const bool sample_now = (enlarged && grid_logs[which] < 40) ||
+                                        (grid_hits[which] % 400 == 1 && grid_logs[which] < 200);
                 if (sample_now) {
                     ++grid_logs[which];
                     constexpr u32 grid_n = 8;
