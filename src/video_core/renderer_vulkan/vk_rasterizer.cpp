@@ -1701,9 +1701,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // keeps the readback smaller than the guest allocation even when the host image was
             // enlarged past it.
             if (image.info.guest_address == 0x20f0c0000ull) {
-                static bool logged_light_grid = false;
-                if (!logged_light_grid) {
-                    logged_light_grid = true;
+                static u32 logged_light_grid = 0;
+                ++logged_light_grid;
+                if (logged_light_grid % 200 == 1 && logged_light_grid <= 6000) {
                     const u32 grid_w = image.info.size.width;
                     const u32 grid_h = image.info.size.height;
                     const u32 bpp = image.info.num_bits / 8;
