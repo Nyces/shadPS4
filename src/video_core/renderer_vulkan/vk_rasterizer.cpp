@@ -1695,43 +1695,47 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
-            // TEMPORARY DIAGNOSTIC: read the light and composition targets back and report a coarse
-            // brightness grid, so the region their content covers can be seen without a capture. A
-            // small staging buffer holds one texel from the centre of each of the sixteen cells,
-            // which keeps the readback smaller than the guest allocation even when the host image
-            // was enlarged past it.
+            // TEMPORARY DIAGNOSTIC: read the light target and the output surface back and report an
+            // 8x8 brightness grid, so the region their content covers can be seen without a
+            // capture. A small staging buffer holds one texel from the centre of each of the
+            // sixty-four cells, which keeps the readback smaller than the guest allocation even
+            // when the host image was enlarged past it.
             if (image.info.guest_address == 0x20f0c0000ull ||
-                image.info.guest_address == 0x207140000ull ||
-                image.info.guest_address == 0x208240000ull) {
+                image.info.guest_address == 0x202040000ull ||
+                image.info.guest_address == 0x200040000ull) {
                 static u32 grid_hits[3]{};
                 static u32 grid_logs[3]{};
                 const u32 which = image.info.guest_address == 0x20f0c0000ull
                                       ? 0u
-                                      : (image.info.guest_address == 0x207140000ull ? 1u : 2u);
+                                      : (image.info.guest_address == 0x202040000ull ? 1u : 2u);
                 ++grid_hits[which];
                 const bool enlarged = image.info.size.width >= 3840;
                 const bool sample_now = (enlarged && grid_logs[which] < 80) ||
                                         (grid_hits[which] % 500 == 1 && grid_logs[which] < 300);
                 if (sample_now) {
                     ++grid_logs[which];
+                    constexpr u32 grid_n = 8;
+                    constexpr u32 grid_cells = grid_n * grid_n;
                     const u32 grid_w = image.info.size.width;
                     const u32 grid_h = image.info.size.height;
                     const u32 bpp = image.info.num_bits / 8;
                     const u32 texel = 8;
                     auto& download =
                         buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::Download);
-                    const auto [data, base_offset] = download.Map(u64(16) * texel);
+                    const auto [data, base_offset] = download.Map(u64(grid_cells) * texel);
                     download.Commit();
                     scheduler.EndRendering();
                     const auto cmdbuf = scheduler.CommandBuffer();
                     image.Transit(vk::ImageLayout::eTransferSrcOptimal,
                                   vk::AccessFlagBits2::eTransferRead, {});
-                    for (u32 gy = 0; gy < 4; ++gy) {
-                        for (u32 gx = 0; gx < 4; ++gx) {
-                            const u32 px = std::min(grid_w - 1, (gx * 2 + 1) * grid_w / 8);
-                            const u32 py = std::min(grid_h - 1, (gy * 2 + 1) * grid_h / 8);
+                    for (u32 gy = 0; gy < grid_n; ++gy) {
+                        for (u32 gx = 0; gx < grid_n; ++gx) {
+                            const u32 px =
+                                std::min(grid_w - 1, (gx * 2 + 1) * grid_w / (grid_n * 2));
+                            const u32 py =
+                                std::min(grid_h - 1, (gy * 2 + 1) * grid_h / (grid_n * 2));
                             const vk::BufferImageCopy copy = {
-                                .bufferOffset = base_offset + u64(gy * 4 + gx) * texel,
+                                .bufferOffset = base_offset + u64(gy * grid_n + gx) * texel,
                                 .bufferRowLength = 0,
                                 .bufferImageHeight = 0,
                                 .imageSubresource =
@@ -1773,7 +1777,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         return std::bit_cast<float>(bits);
                     };
                     std::string grid;
-                    for (u32 i = 0; i < 16; ++i) {
+                    for (u32 i = 0; i < grid_cells; ++i) {
                         const u8* src = data + i * texel;
                         float lum = 0.0f;
                         if (bpp == 8) {
@@ -1786,8 +1790,8 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         }
                         grid += fmt::format("{:.3f} ", lum);
                     }
-                    LOG_INFO(Render_Vulkan, "Layer grid: addr={:#x} {}x{} bpp={} {}",
-                             image.info.guest_address, grid_w, grid_h, bpp, grid);
+                    LOG_INFO(Render_Vulkan, "Layer grid: addr={:#x} {}x{} g{} bpp={} {}",
+                             image.info.guest_address, grid_w, grid_h, grid_n, bpp, grid);
                 }
             }
 
