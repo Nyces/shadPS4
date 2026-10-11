@@ -646,15 +646,46 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             up != upscaled_targets.end()) {
             desc.info.size.width = up->second.first;
             desc.info.size.height = up->second.second;
-        } else if (rt_fit_x > 1.001f) {
-            desc.info.size.width = u32(desc.info.size.width * rt_fit_x);
-            desc.info.size.height = u32(desc.info.size.height * rt_fit_y);
+        } else if (rt_fit_x > 1.001f ||
+                   (guest_window_width > 0 && (desc.info.size.width > guest_window_width ||
+                                               desc.info.size.height > guest_window_height))) {
+            // The depth leaves the window the guest sized it for either because this pass
+            // enlarged its colour target and the ratio has to carry the depth with it, or
+            // because the hint was lifted to the VideoOut surface before the descriptor was
+            // built. Multiplying the latter again would double the ratio and allocate an
+            // image four times the surface, so only the ratio is applied where the hint still
+            // describes the window.
+            const bool hint_lifted =
+                guest_window_width > 0 && (desc.info.size.width > guest_window_width ||
+                                           desc.info.size.height > guest_window_height);
+            if (!hint_lifted) {
+                desc.info.size.width = u32(desc.info.size.width * rt_fit_x);
+                desc.info.size.height = u32(desc.info.size.height * rt_fit_y);
+            }
             upscaled_targets[desc.info.guest_address] = {desc.info.size.width,
                                                          desc.info.size.height};
             depth_enlarged = true;
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
+        {
+            // TEMPORARY DIAGNOSTIC: report the depth target the scene passes share, in both the
+            // native and the upscaled run. The layer that stays in the corner is rejected by a
+            // depth buffer whose only valid part is the game's window, so the host extent, the
+            // branch that produced it and the value the clear would use have to be visible to
+            // tell a clear that never ran from one that ran with the wrong value.
+            static std::unordered_map<u64, u32> depth_logs;
+            if (depth_logs[u64(desc.info.guest_address)]++ < 6) {
+                LOG_INFO(Render_Vulkan,
+                         "Depth target: addr={:#x}, hint={}x{}, host={}x{}, enlargedNow={}, "
+                         "rtFit={}x{}, follows={}, window={}x{}, clearEnable={}, clearValue={}",
+                         desc.info.guest_address, hint.width, hint.height, image.info.size.width,
+                         image.info.size.height, depth_enlarged, rt_fit_x, rt_fit_y,
+                         upscaled_targets.contains(desc.info.guest_address), guest_window_width,
+                         guest_window_height, True(regs.depth_render_control.depth_clear_enable),
+                         regs.depth_clear);
+            }
+        }
         if (depth_enlarged) {
             // The guest allocates and clears its depth buffer for the original window, and
             // only that much of the allocation holds valid depth. The host image has just
@@ -664,9 +695,14 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             // wash and the penlights in the top-left rectangle of the frame and leaves the
             // rest of their layer empty. Bring the whole enlarged extent to the guest's own
             // clear value, so the area the guest never wrote counts as cleared instead of
-            // as an occluder.
+            // as an occluder. A zero there would put the nearest depth over the whole buffer
+            // instead, so it counts as unset and takes the far plane.
+            float depth_clear = regs.depth_clear;
+            if (depth_clear == 0.0f) {
+                depth_clear = 1.0f;
+            }
             const vk::ClearValue clear_value = {
-                .depthStencil = {.depth = regs.depth_clear, .stencil = regs.stencil_clear}};
+                .depthStencil = {.depth = depth_clear, .stencil = regs.stencil_clear}};
             image.ClearDepthStencil(clear_value, desc.view_info.range);
         }
         image.binding.is_target = 1u;
