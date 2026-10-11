@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <unordered_map>
@@ -1789,18 +1791,18 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // capture. A small staging buffer holds one texel from the centre of each of the
             // sixty-four cells, which keeps the readback smaller than the guest allocation even
             // when the host image was enlarged past it.
-            if (image.info.guest_address == 0x20f0c0000ull ||
-                image.info.guest_address == 0x208240000ull ||
-                image.info.guest_address == 0x200040000ull) {
-                static u32 grid_hits[3]{};
-                static u32 grid_logs[3]{};
-                const u32 which = image.info.guest_address == 0x20f0c0000ull
-                                      ? 0u
-                                      : (image.info.guest_address == 0x208240000ull ? 1u : 2u);
+            static constexpr std::array<u64, 5> kGridAddrs = {
+                0x20f0c0000ull, 0x208240000ull, 0x200040000ull, 0x207140000ull, 0x20acc0000ull};
+            const auto which_it =
+                std::find(kGridAddrs.begin(), kGridAddrs.end(), u64(image.info.guest_address));
+            if (which_it != kGridAddrs.end()) {
+                static u32 grid_hits[kGridAddrs.size()]{};
+                static u32 grid_logs[kGridAddrs.size()]{};
+                const u32 which = u32(which_it - kGridAddrs.begin());
                 ++grid_hits[which];
                 const bool enlarged = image.info.size.width >= 3840;
-                const bool sample_now = (enlarged && grid_logs[which] < 40) ||
-                                        (grid_hits[which] % 400 == 1 && grid_logs[which] < 200);
+                const bool sample_now = (enlarged && grid_logs[which] < 8) ||
+                                        (grid_hits[which] % 100 == 1 && grid_logs[which] < 200);
                 if (sample_now) {
                     ++grid_logs[which];
                     constexpr u32 grid_n = 8;
@@ -1879,8 +1881,10 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         }
                         grid += fmt::format("{:.3f} ", lum);
                     }
-                    LOG_INFO(Render_Vulkan, "Layer grid: addr={:#x} {}x{} g{} bpp={} {}",
-                             image.info.guest_address, grid_w, grid_h, grid_n, bpp, grid);
+                    LOG_INFO(Render_Vulkan,
+                             "Layer grid: addr={:#x} {}x{} g{} bpp={} pitch={} bound={}x{} {}",
+                             image.info.guest_address, grid_w, grid_h, grid_n, bpp,
+                             image.info.pitch, desc.info.size.width, desc.info.size.height, grid);
                 }
             }
 
