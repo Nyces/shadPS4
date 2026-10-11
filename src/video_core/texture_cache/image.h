@@ -139,6 +139,8 @@ struct Image {
     void Resolve(Image& src_image, const VideoCore::SubresourceRange& mrt0_range,
                  const VideoCore::SubresourceRange& mrt1_range);
     void Clear(const vk::ClearValue& clear_value, const VideoCore::SubresourceRange& range);
+    void ClearDepthStencil(const vk::ClearValue& clear_value,
+                           const VideoCore::SubresourceRange& range);
 
     void SetBackingSamples(u32 num_samples, bool copy_backing = true);
 

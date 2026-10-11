@@ -797,6 +797,22 @@ void Image::Clear(const vk::ClearValue& clear_value, const VideoCore::Subresourc
                            vk_range);
 }
 
+void Image::ClearDepthStencil(const vk::ClearValue& clear_value,
+                              const VideoCore::SubresourceRange& range) {
+    const vk::ImageSubresourceRange vk_range = {
+        .aspectMask = aspect_mask,
+        .baseMipLevel = range.base.level,
+        .levelCount = range.extent.levels,
+        .baseArrayLayer = range.base.layer,
+        .layerCount = range.extent.layers,
+    };
+    scheduler->EndRendering();
+    Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {});
+    const auto cmdbuf = scheduler->CommandBuffer();
+    cmdbuf.clearDepthStencilImage(GetImage(), vk::ImageLayout::eTransferDstOptimal,
+                                  clear_value.depthStencil, vk_range);
+}
+
 void Image::SetBackingSamples(u32 num_samples, bool copy_backing) {
     if (!backing || backing->num_samples == num_samples) {
         return;

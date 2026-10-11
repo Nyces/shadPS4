@@ -641,6 +641,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         // stages that come later land on the same image instead of a second one over the same
         // memory that nothing clears. Only the host extent changes; the guest layout keeps
         // describing the allocation the game actually wrote.
+        bool depth_enlarged = false;
         if (const auto up = upscaled_targets.find(desc.info.guest_address);
             up != upscaled_targets.end()) {
             desc.info.size.width = up->second.first;
@@ -650,9 +651,24 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
             desc.info.size.height = u32(desc.info.size.height * rt_fit_y);
             upscaled_targets[desc.info.guest_address] = {desc.info.size.width,
                                                          desc.info.size.height};
+            depth_enlarged = true;
         }
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
+        if (depth_enlarged) {
+            // The guest allocates and clears its depth buffer for the original window, and
+            // only that much of the allocation holds valid depth. The host image has just
+            // been enlarged past it, so the rest of it keeps the zero it was created with,
+            // which reads as the nearest depth and rejects every fragment that reaches it.
+            // The scene draws that still cover the window survive, which puts the stage
+            // wash and the penlights in the top-left rectangle of the frame and leaves the
+            // rest of their layer empty. Bring the whole enlarged extent to the guest's own
+            // clear value, so the area the guest never wrote counts as cleared instead of
+            // as an occluder.
+            const vk::ClearValue clear_value = {
+                .depthStencil = {.depth = regs.depth_clear, .stencil = regs.stencil_clear}};
+            image.ClearDepthStencil(clear_value, desc.view_info.range);
+        }
         image.binding.is_target = 1u;
     } else {
         db_desc.first = {};
