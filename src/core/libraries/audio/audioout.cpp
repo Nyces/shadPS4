@@ -167,6 +167,13 @@ static void AudioOutputThread(std::shared_ptr<PortOut> port, const std::stop_tok
         const auto thread_name = fmt::format("shadPS4:AudioOutputThread:{}", fmt::ptr(port.get()));
         Common::SetCurrentThreadName(thread_name.c_str());
     }
+    // The audio output thread drives the blocking rhythm of
+    // sceAudioOutOutput, which the game uses to advance its BGM progress
+    // counter and dance animation timing. Without an elevated priority it
+    // gets starved during GPU shader compilation bursts (CPU-intensive),
+    // stretching the nominal ~21 ms period and stalling the game main
+    // thread waiting on output_cv.
+    Common::SetCurrentThreadPriority(Common::ThreadPriority::VeryHigh);
 
     Common::AccurateTimer timer(
         std::chrono::nanoseconds(1000000000ULL * port->buffer_frames / port->sample_rate));
@@ -572,7 +579,16 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
     s32 samples_sent = 0;
     {
         std::unique_lock lock{port->mutex};
+        const auto wait_begin = std::chrono::high_resolution_clock::now();
         port->output_cv.wait(lock, [&] { return !port->output_ready || port->closing; });
+        const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::high_resolution_clock::now() - wait_begin)
+                                 .count();
+        if (wait_ms > 50) {
+            LOG_WARNING(Lib_AudioOut,
+                        "sceAudioOutOutput blocked for {} ms on port {} (period ~{} ms)", wait_ms,
+                        port_id, 1000ULL * port->buffer_frames / port->sample_rate);
+        }
 
         if (port->closing) {
             LOG_DEBUG(Lib_AudioOut, "Port {} closed while waiting for drain", port_id);
@@ -615,9 +631,7 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
     }
 
     std::vector<std::shared_ptr<PortOut>> ports;
-    std::vector<std::unique_lock<std::mutex>> locks;
     ports.reserve(num);
-    locks.reserve(num);
 
     u32 buffer_frames = 0;
 
@@ -660,7 +674,6 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
             }
 
             ports.push_back(port);
-            locks.emplace_back(port->mutex);
 
             // Check consistent buffer size
             if (i == 0) {
@@ -672,23 +685,35 @@ s32 PS4_SYSV_ABI sceAudioOutOutputs(OrbisAudioOutOutputParam* param, u32 num) {
         }
     }
 
-    // Wait for all ports to be ready
+    // Wait and fill each port independently. The previous implementation
+    // acquired all port mutexes up front and then waited on them serially,
+    // which blocked every other port's AudioOutputThread from consuming its
+    // buffer while waiting on the first port. This stretched the nominal
+    // ~21 ms period to N*21 ms and stalled the game main thread. Processing
+    // each port with its own scoped lock lets the other AudioOutputThreads
+    // run freely.
+    const auto total_begin = std::chrono::high_resolution_clock::now();
     for (u32 i = 0; i < num; i++) {
-        ports[i]->output_cv.wait(locks[i],
+        std::unique_lock lock{ports[i]->mutex};
+        ports[i]->output_cv.wait(lock,
                                  [&] { return !ports[i]->output_ready || ports[i]->closing; });
 
         if (ports[i]->closing) {
             LOG_DEBUG(Lib_AudioOut, "Port closed while waiting for drain");
             return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED;
         }
-    }
 
-    // Copy data to all ports
-    for (u32 i = 0; i < num; i++) {
         if (param[i].ptr != nullptr) {
             std::memcpy(ports[i]->output_buffer, param[i].ptr, ports[i]->BufferSize());
             ports[i]->output_ready = true;
         }
+    }
+    const auto total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::high_resolution_clock::now() - total_begin)
+                              .count();
+    if (total_ms > 50) {
+        LOG_WARNING(Lib_AudioOut, "sceAudioOutOutputs blocked for {} ms across {} ports", total_ms,
+                    num);
     }
 
     return buffer_frames;

@@ -115,7 +115,15 @@ int PS4_SYSV_ABI sceAjmBatchWait(const u32 context_id, const u32 batch_id, const
         return ORBIS_AJM_ERROR_INVALID_CONTEXT;
     }
 
-    return it->second->BatchWait(batch_id, timeout, batch_error);
+    const auto ret = it->second->BatchWait(batch_id, timeout, batch_error);
+    if (ret != ORBIS_OK) {
+        LOG_WARNING(Lib_Ajm, "sceAjmBatchWait returned {:#x} for batch {}", ret, batch_id);
+    }
+    if (batch_error != nullptr && batch_error->error_code != 0) {
+        LOG_WARNING(Lib_Ajm, "sceAjmBatchWait batch_error: code = {:#x}, cmd_offset = {}",
+                    batch_error->error_code, batch_error->cmd_offset);
+    }
+    return ret;
 }
 
 int PS4_SYSV_ABI sceAjmDecAt9ParseConfigData() {
