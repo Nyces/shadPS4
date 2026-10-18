@@ -160,59 +160,95 @@ Liverpool::Task Liverpool::ProcessCeUpdate(std::span<const u32> ccb) {
 
         const auto* header = reinterpret_cast<const PM4Header*>(ccb.data());
         const u32 type = header->type;
-        if (type != 3) {
-            // No other types of packets were spotted so far
-            UNREACHABLE_MSG("Invalid PM4 type {}", type);
-        }
+        const auto base_addr = reinterpret_cast<uintptr_t>(ccb.data());
 
-        const PM4ItOpcode opcode = header->type3.opcode;
-        const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
-        switch (opcode) {
-        case PM4ItOpcode::Nop: {
-            // const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
-            break;
-        }
-        case PM4ItOpcode::WriteConstRam: {
-            const auto* write_const = reinterpret_cast<const PM4WriteConstRam*>(header);
-            memcpy(cblock.constants_heap.data() + write_const->Offset(), &write_const->data,
-                   write_const->Size());
-            break;
-        }
-        case PM4ItOpcode::DumpConstRam: {
-            const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
-            memcpy(dump_const->Address<void*>(),
-                   cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
-            break;
-        }
-        case PM4ItOpcode::IncrementCeCounter: {
-            ++cblock.ce_count;
-            break;
-        }
-        case PM4ItOpcode::WaitOnDeCounterDiff: {
-            const auto diff = it_body[0];
-            while ((cblock.de_count - cblock.ce_count) >= diff) {
-                YIELD_CE();
+        switch (type) {
+        case 0: {
+            const u32 base_reg = header->type0.base.Value();
+            const u32 num_words = header->type0.NumWords();
+            const u32 pkt_size = 1 + num_words;
+            if (pkt_size > ccb.size()) {
+                LOG_WARNING(Render, "CE PM4 type 0 packet truncated: need {} DWORDS, have {}",
+                            pkt_size, ccb.size());
+                ccb = ccb.subspan(ccb.size());
+                break;
             }
-            break;
+            const auto* data = reinterpret_cast<const u32*>(header) + 1;
+            if (base_reg + num_words <= Regs::NumRegs) {
+                std::memcpy(&regs.reg_array[base_reg], data, num_words * sizeof(u32));
+            } else {
+                LOG_WARNING(Render,
+                            "CE PM4 type 0 register write out of range: base={:#x}, num_words={}",
+                            base_reg, num_words);
+            }
+            ccb = NextPacket(ccb, pkt_size);
+            continue;
         }
-        case PM4ItOpcode::IndirectBufferConst: {
-            const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            auto task =
-                ProcessCeUpdate({indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
-            RESUME_CE(task);
-
-            while (!task.handle.done()) {
-                YIELD_CE();
+        case 2:
+            // Type-2 packet are used for padding purposes
+            ccb = NextPacket(ccb, 1);
+            continue;
+        case 3: {
+            const PM4ItOpcode opcode = header->type3.opcode;
+            const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
+            switch (opcode) {
+            case PM4ItOpcode::Nop: {
+                // const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
+                break;
+            }
+            case PM4ItOpcode::WriteConstRam: {
+                const auto* write_const = reinterpret_cast<const PM4WriteConstRam*>(header);
+                memcpy(cblock.constants_heap.data() + write_const->Offset(), &write_const->data,
+                       write_const->Size());
+                break;
+            }
+            case PM4ItOpcode::DumpConstRam: {
+                const auto* dump_const = reinterpret_cast<const PM4DumpConstRam*>(header);
+                memcpy(dump_const->Address<void*>(),
+                       cblock.constants_heap.data() + dump_const->Offset(), dump_const->Size());
+                break;
+            }
+            case PM4ItOpcode::IncrementCeCounter: {
+                ++cblock.ce_count;
+                break;
+            }
+            case PM4ItOpcode::WaitOnDeCounterDiff: {
+                const auto diff = it_body[0];
+                while ((cblock.de_count - cblock.ce_count) >= diff) {
+                    YIELD_CE();
+                }
+                break;
+            }
+            case PM4ItOpcode::IndirectBufferConst: {
+                const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+                auto task = ProcessCeUpdate(
+                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size});
                 RESUME_CE(task);
+
+                while (!task.handle.done()) {
+                    YIELD_CE();
+                    RESUME_CE(task);
+                }
+                break;
             }
-            break;
+            default: {
+                const u32 pkt_size = header->type3.NumWords() + 1;
+                LOG_WARNING(Render, "CE Unknown PM4 type 3 opcode {:#x} with count {}, skipping",
+                            static_cast<u32>(opcode), header->type3.NumWords());
+                ccb = NextPacket(ccb, pkt_size);
+                continue;
+            }
+            }
+            ccb = NextPacket(ccb, header->type3.NumWords() + 1);
+            continue;
         }
-        default:
-            const u32 count = header->type3.NumWords();
-            UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
-                            static_cast<u32>(opcode), count);
+        default: {
+            LOG_WARNING(Render, "CE Unknown PM4 type {} at addr={:#x}, skipping 1 DWORD", type,
+                        base_addr);
+            ccb = ccb.subspan(1);
+            continue;
         }
-        ccb = NextPacket(ccb, header->type3.NumWords() + 1);
+        }
     }
 
     FIBER_EXIT;
@@ -241,13 +277,27 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
         const u32 type = header->type;
 
         switch (type) {
-        default:
-            UNREACHABLE_MSG("Wrong PM4 type {}", type);
-            break;
-        case 0:
-            UNREACHABLE_MSG("Unimplemented PM4 type 0, base reg: {}, size: {}",
-                            header->type0.base.Value(), header->type0.NumWords());
-            break;
+        case 0: {
+            const u32 base_reg = header->type0.base.Value();
+            const u32 num_words = header->type0.NumWords();
+            const u32 pkt_size = 1 + num_words;
+            if (pkt_size > dcb.size()) {
+                LOG_WARNING(Render, "GFX PM4 type 0 packet truncated: need {} DWORDS, have {}",
+                            pkt_size, dcb.size());
+                dcb = dcb.subspan(dcb.size());
+                break;
+            }
+            const auto* data = reinterpret_cast<const u32*>(header) + 1;
+            if (base_reg + num_words <= Regs::NumRegs) {
+                std::memcpy(&regs.reg_array[base_reg], data, num_words * sizeof(u32));
+            } else {
+                LOG_WARNING(Render,
+                            "GFX PM4 type 0 register write out of range: base={:#x}, num_words={}",
+                            base_reg, num_words);
+            }
+            dcb = NextPacket(dcb, pkt_size);
+            continue;
+        }
         case 2:
             // Type-2 packet are used for padding purposes
             dcb = NextPacket(dcb, 1);
@@ -752,8 +802,21 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 if (mem_semaphore->IsSignaling()) {
                     mem_semaphore->Signal();
                 } else {
+                    const auto sem_start = std::chrono::steady_clock::now();
+                    bool sem_warned = false;
                     while (!mem_semaphore->Signaled()) {
                         YIELD_GFX();
+                        if (!sem_warned) {
+                            const auto sem_elapsed =
+                                std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    std::chrono::steady_clock::now() - sem_start)
+                                    .count();
+                            if (sem_elapsed >= 500) {
+                                LOG_WARNING(Render, "GFX MemSemaphore waiting for {}ms",
+                                            sem_elapsed);
+                                sem_warned = true;
+                            }
+                        }
                     }
                     mem_semaphore->Decrement();
                 }
@@ -768,25 +831,32 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                     break;
                 }
                 const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
+                const auto rw_start = std::chrono::steady_clock::now();
+                bool rw_warned = false;
                 while (!rewind->Valid()) {
                     YIELD_GFX();
+                    if (!rw_warned) {
+                        const auto rw_elapsed =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now() - rw_start)
+                                .count();
+                        if (rw_elapsed >= 500) {
+                            LOG_WARNING(Render, "GFX Rewind waiting for {}ms", rw_elapsed);
+                            rw_warned = true;
+                        }
+                    }
                 }
                 break;
             }
             case PM4ItOpcode::WaitRegMem: {
                 const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
                 // ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-                // Optimization: VO label waits are special because the emulator
-                // will write to the label when presentation is finished. So if
-                // there are no other submits to yield to we can sleep the thread
-                // instead and allow other tasks to run.
-                const u64* wait_addr = wait_reg_mem->Address<u64*>();
-                if (vo_port->IsVoLabel(wait_addr) &&
-                    num_submits == mapped_queues[GfxQueueId].submits.size()) {
-                    vo_port->WaitVoLabel([&] { return wait_reg_mem->Test(regs.reg_array); });
-                    break;
-                }
+                // VO label waits are special because the emulator will write to the label
+                // when presentation is finished. WaitVoLabel would sleep on a condition
+                // variable and block the command processor, so always use the cooperative
+                // YIELD_GFX loop and keep pumping ProcessCommands() while waiting.
                 while (!wait_reg_mem->Test(regs.reg_array)) {
+                    ProcessCommands();
                     YIELD_GFX();
                 }
                 break;
@@ -809,6 +879,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             }
             case PM4ItOpcode::WaitOnCeCounter: {
                 while (cblock.ce_count <= cblock.de_count && !ce_task.handle.done()) {
+                    ProcessCommands();
                     RESUME_GFX(ce_task);
                 }
                 break;
@@ -843,23 +914,34 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
                 }
                 break;
             }
-            default:
-                UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
-                                static_cast<u32>(opcode), count);
+            default: {
+                const u32 pkt_size = header->type3.NumWords() + 1;
+                LOG_WARNING(Render, "GFX Unknown PM4 type 3 opcode {:#x} with count {}, skipping",
+                            static_cast<u32>(opcode), count);
+                dcb = NextPacket(dcb, pkt_size);
+                continue;
+            }
             }
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
         }
+    default: {
+        LOG_WARNING(Render, "GFX Unknown PM4 type {} at addr={:#x}, skipping 1 DWORD", type,
+                    base_addr);
+        dcb = dcb.subspan(1);
+        continue;
     }
-
-    if (ce_task.handle) {
-        while (!ce_task.handle.done()) {
-            RESUME_GFX(ce_task);
-        }
-        ce_task.handle.destroy();
     }
+}
 
-    FIBER_EXIT;
+if (ce_task.handle) {
+    while (!ce_task.handle.done()) {
+        RESUME_GFX(ce_task);
+    }
+    ce_task.handle.destroy();
+}
+
+FIBER_EXIT;
 }
 
 template <bool is_indirect>
@@ -879,12 +961,29 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
         ProcessCommands();
 
         auto* header = reinterpret_cast<const PM4Header*>(acb.data());
-        u32 next_dw_off = header->type3.NumWords() + 1;
+
+        // Helper to compute total packet size in DWORDS based on header type.
+        // The ASC ring may split any packet type across submissions, so the
+        // size must not be derived from type-3 fields unconditionally.
+        auto compute_pkt_size = [](const PM4Header* h) -> u32 {
+            switch (h->type.Value()) {
+            case 0:
+                return 1 + h->type0.NumWords();
+            case 2:
+                return 1;
+            case 3:
+                return 1 + h->type3.NumWords();
+            default:
+                return 1;
+            }
+        };
+
+        u32 next_dw_off = compute_pkt_size(header);
 
         // If we have a buffered packet, use it.
         if (queue.tmp_dwords > 0) [[unlikely]] {
             header = reinterpret_cast<const PM4Header*>(queue.tmp_packet.data());
-            next_dw_off = header->type3.NumWords() + 1 - queue.tmp_dwords;
+            next_dw_off = compute_pkt_size(header) - queue.tmp_dwords;
             std::memcpy(queue.tmp_packet.data() + queue.tmp_dwords, acb.data(),
                         next_dw_off * sizeof(u32));
             queue.tmp_dwords = 0;
@@ -901,223 +1000,231 @@ Liverpool::Task Liverpool::ProcessCompute(std::span<const u32> acb, u32 vqid) {
             break;
         }
 
-        if (header->type == 2) {
+        if (header->type == 0) {
+            const u32 base_reg = header->type0.base.Value();
+            const u32 num_words = header->type0.NumWords();
+            const auto* data = reinterpret_cast<const u32*>(header) + 1;
+            if (base_reg + num_words <= Regs::NumRegs) {
+                std::memcpy(&regs.reg_array[base_reg], data, num_words * sizeof(u32));
+            } else {
+                LOG_WARNING(Render,
+                            "ASC PM4 type 0 register write out of range: base={:#x}, num_words={}",
+                            base_reg, num_words);
+            }
+        } else if (header->type == 2) {
             // Type-2 packet are used for padding purposes
-            next_dw_off = 1;
-            acb = NextPacket(acb, next_dw_off);
-            if constexpr (!is_indirect) {
-                *queue.read_addr += next_dw_off;
-                *queue.read_addr %= queue.ring_size_dw;
+        } else if (header->type != 3) {
+            LOG_WARNING(Render, "ASC Unknown PM4 type {} at addr={:#x}, skipping 1 DWORD",
+                        header->type.Value(), base_addr);
+        } else {
+
+            const PM4ItOpcode opcode = header->type3.opcode;
+
+            const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
+            switch (opcode) {
+            case PM4ItOpcode::Nop: {
+                const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
+                break;
             }
-            continue;
-        }
-
-        if (header->type != 3) {
-            // No other types of packets were spotted so far
-            UNREACHABLE_MSG("Invalid PM4 type {}", header->type.Value());
-        }
-
-        const PM4ItOpcode opcode = header->type3.opcode;
-
-        const auto* it_body = reinterpret_cast<const u32*>(header) + 1;
-        switch (opcode) {
-        case PM4ItOpcode::Nop: {
-            const auto* nop = reinterpret_cast<const PM4CmdNop*>(header);
-            break;
-        }
-        case PM4ItOpcode::IndirectBuffer: {
-            const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
-            auto task = ProcessCompute<true>(
-                {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, vqid);
-            RESUME_ASC(task, vqid);
-
-            while (!task.handle.done()) {
-                YIELD_ASC(vqid);
+            case PM4ItOpcode::IndirectBuffer: {
+                const auto* indirect_buffer = reinterpret_cast<const PM4CmdIndirectBuffer*>(header);
+                auto task = ProcessCompute<true>(
+                    {indirect_buffer->Address<const u32>(), indirect_buffer->ib_size}, vqid);
                 RESUME_ASC(task, vqid);
-            }
-            break;
-        }
-        case PM4ItOpcode::DmaData: {
-            const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
-            if (dma_data->dst_addr_lo == 0x3022C || !rasterizer) {
-                break;
-            }
-            ASSERT(dma_data->command.das == 0);
-            if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
-                rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(), dma_data->data,
-                                       true);
-            } else if ((dma_data->src_sel == DmaDataSrc::Memory ||
-                        dma_data->src_sel == DmaDataSrc::MemoryUsingL2) &&
-                       dma_data->dst_sel == DmaDataDst::Gds) {
-                rasterizer->CopyBuffer(dma_data->dst_addr_lo, dma_data->SrcAddress<VAddr>(),
-                                       dma_data->NumBytes(), true, false);
-            } else if (dma_data->src_sel == DmaDataSrc::Data &&
-                       (dma_data->dst_sel == DmaDataDst::Memory ||
-                        dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
-                rasterizer->FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
-                                       dma_data->data, false);
-            } else if (dma_data->src_sel == DmaDataSrc::Gds &&
-                       (dma_data->dst_sel == DmaDataDst::Memory ||
-                        dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
-                rasterizer->CopyBuffer(dma_data->DstAddress<VAddr>(), dma_data->src_addr_lo,
-                                       dma_data->NumBytes(), false, true);
-            } else if ((dma_data->src_sel == DmaDataSrc::Memory ||
-                        dma_data->src_sel == DmaDataSrc::MemoryUsingL2) &&
-                       (dma_data->dst_sel == DmaDataDst::Memory ||
-                        dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
-                const u32 num_bytes = dma_data->NumBytes();
-                const VAddr src_addr = dma_data->SrcAddress<VAddr>();
-                const VAddr dst_addr = dma_data->DstAddress<VAddr>();
-                const PM4Header* header =
-                    reinterpret_cast<const PM4Header*>(dst_addr - sizeof(PM4Header));
-                if (dst_addr >= base_addr && dst_addr < base_addr + acb_size &&
-                    num_bytes == sizeof(PM4CmdDispatchIndirect::GroupDimensions) &&
-                    header->type == 3 && header->type3.opcode == PM4ItOpcode::DispatchDirect) {
-                    indirect_patches.emplace_back(header, src_addr);
-                } else {
-                    rasterizer->CopyBuffer(dst_addr, src_addr, num_bytes, false, false);
-                }
-            } else {
-                UNREACHABLE_MSG("WriteData src_sel = {}, dst_sel = {}", u32(dma_data->src_sel),
-                                u32(dma_data->dst_sel));
-            }
-            break;
-        }
-        case PM4ItOpcode::AcquireMem: {
-            break;
-        }
-        case PM4ItOpcode::Rewind: {
-            if (!rasterizer) {
-                break;
-            }
-            const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
-            while (!rewind->Valid()) {
-                YIELD_ASC(vqid);
-            }
-            break;
-        }
-        case PM4ItOpcode::SetShReg: {
-            const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
-            const auto set_size = (header->type3.NumWords() - 1) * sizeof(u32);
 
-            if (set_data->reg_offset >= 0x200 &&
-                set_data->reg_offset <= (0x200 + sizeof(ComputeProgram) / 4)) {
-                ASSERT(set_size <= sizeof(ComputeProgram));
-                auto* addr = reinterpret_cast<u32*>(&mapped_queues[vqid + 1].cs_state) +
-                             (set_data->reg_offset - 0x200);
-                std::memcpy(addr, header + 2, set_size);
-            } else {
-                std::memcpy(&regs.reg_array[Regs::ShRegWordOffset + set_data->reg_offset],
-                            header + 2, set_size);
+                while (!task.handle.done()) {
+                    YIELD_ASC(vqid);
+                    RESUME_ASC(task, vqid);
+                }
+                break;
             }
-            break;
-        }
-        case PM4ItOpcode::SetQueueReg: {
-            const auto* set_data = reinterpret_cast<const PM4CmdSetQueueReg*>(header);
-            LOG_WARNING(Render, "Encountered compute SetQueueReg: vqid = {}, reg_offset = {:#x}",
-                        set_data->vqid.Value(), set_data->reg_offset.Value());
-            break;
-        }
-        case PM4ItOpcode::DispatchDirect: {
-            const auto* dispatch_direct = reinterpret_cast<const PM4CmdDispatchDirect*>(header);
-            if (auto it = std::ranges::find(indirect_patches, header, &IndirectPatch::header);
-                it != indirect_patches.end()) {
+            case PM4ItOpcode::DmaData: {
+                const auto* dma_data = reinterpret_cast<const PM4DmaData*>(header);
+                if (dma_data->dst_addr_lo == 0x3022C || !rasterizer) {
+                    break;
+                }
+                ASSERT(dma_data->command.das == 0);
+                if (dma_data->src_sel == DmaDataSrc::Data && dma_data->dst_sel == DmaDataDst::Gds) {
+                    rasterizer->FillBuffer(dma_data->dst_addr_lo, dma_data->NumBytes(),
+                                           dma_data->data, true);
+                } else if ((dma_data->src_sel == DmaDataSrc::Memory ||
+                            dma_data->src_sel == DmaDataSrc::MemoryUsingL2) &&
+                           dma_data->dst_sel == DmaDataDst::Gds) {
+                    rasterizer->CopyBuffer(dma_data->dst_addr_lo, dma_data->SrcAddress<VAddr>(),
+                                           dma_data->NumBytes(), true, false);
+                } else if (dma_data->src_sel == DmaDataSrc::Data &&
+                           (dma_data->dst_sel == DmaDataDst::Memory ||
+                            dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                    rasterizer->FillBuffer(dma_data->DstAddress<VAddr>(), dma_data->NumBytes(),
+                                           dma_data->data, false);
+                } else if (dma_data->src_sel == DmaDataSrc::Gds &&
+                           (dma_data->dst_sel == DmaDataDst::Memory ||
+                            dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                    rasterizer->CopyBuffer(dma_data->DstAddress<VAddr>(), dma_data->src_addr_lo,
+                                           dma_data->NumBytes(), false, true);
+                } else if ((dma_data->src_sel == DmaDataSrc::Memory ||
+                            dma_data->src_sel == DmaDataSrc::MemoryUsingL2) &&
+                           (dma_data->dst_sel == DmaDataDst::Memory ||
+                            dma_data->dst_sel == DmaDataDst::MemoryUsingL2)) {
+                    const u32 num_bytes = dma_data->NumBytes();
+                    const VAddr src_addr = dma_data->SrcAddress<VAddr>();
+                    const VAddr dst_addr = dma_data->DstAddress<VAddr>();
+                    const PM4Header* header =
+                        reinterpret_cast<const PM4Header*>(dst_addr - sizeof(PM4Header));
+                    if (dst_addr >= base_addr && dst_addr < base_addr + acb_size &&
+                        num_bytes == sizeof(PM4CmdDispatchIndirect::GroupDimensions) &&
+                        header->type == 3 && header->type3.opcode == PM4ItOpcode::DispatchDirect) {
+                        indirect_patches.emplace_back(header, src_addr);
+                    } else {
+                        rasterizer->CopyBuffer(dst_addr, src_addr, num_bytes, false, false);
+                    }
+                } else {
+                    UNREACHABLE_MSG("WriteData src_sel = {}, dst_sel = {}", u32(dma_data->src_sel),
+                                    u32(dma_data->dst_sel));
+                }
+                break;
+            }
+            case PM4ItOpcode::AcquireMem: {
+                break;
+            }
+            case PM4ItOpcode::Rewind: {
+                if (!rasterizer) {
+                    break;
+                }
+                const PM4CmdRewind* rewind = reinterpret_cast<const PM4CmdRewind*>(header);
+                while (!rewind->Valid()) {
+                    YIELD_ASC(vqid);
+                }
+                break;
+            }
+            case PM4ItOpcode::SetShReg: {
+                const auto* set_data = reinterpret_cast<const PM4CmdSetData*>(header);
+                const auto set_size = (header->type3.NumWords() - 1) * sizeof(u32);
+
+                if (set_data->reg_offset >= 0x200 &&
+                    set_data->reg_offset <= (0x200 + sizeof(ComputeProgram) / 4)) {
+                    ASSERT(set_size <= sizeof(ComputeProgram));
+                    auto* addr = reinterpret_cast<u32*>(&mapped_queues[vqid + 1].cs_state) +
+                                 (set_data->reg_offset - 0x200);
+                    std::memcpy(addr, header + 2, set_size);
+                } else {
+                    std::memcpy(&regs.reg_array[Regs::ShRegWordOffset + set_data->reg_offset],
+                                header + 2, set_size);
+                }
+                break;
+            }
+            case PM4ItOpcode::SetQueueReg: {
+                const auto* set_data = reinterpret_cast<const PM4CmdSetQueueReg*>(header);
+                LOG_WARNING(Render,
+                            "Encountered compute SetQueueReg: vqid = {}, reg_offset = {:#x}",
+                            set_data->vqid.Value(), set_data->reg_offset.Value());
+                break;
+            }
+            case PM4ItOpcode::DispatchDirect: {
+                const auto* dispatch_direct = reinterpret_cast<const PM4CmdDispatchDirect*>(header);
+                if (auto it = std::ranges::find(indirect_patches, header, &IndirectPatch::header);
+                    it != indirect_patches.end()) {
+                    const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
+                    rasterizer->DispatchIndirect(it->indirect_addr, 0, size);
+                    break;
+                }
+                auto& cs_program = GetCsRegs();
+                cs_program.dim_x = dispatch_direct->dim_x;
+                cs_program.dim_y = dispatch_direct->dim_y;
+                cs_program.dim_z = dispatch_direct->dim_z;
+                cs_program.dispatch_initiator = dispatch_direct->dispatch_initiator;
+                if (DebugState.DumpingCurrentReg()) {
+                    DebugState.PushRegsDumpCompute(base_addr, reinterpret_cast<uintptr_t>(header),
+                                                   cs_program);
+                }
+                if (!rasterizer || (cs_program.dispatch_initiator & 1) == 0) {
+                    break;
+                }
+                const auto cmd_address = reinterpret_cast<const void*>(header);
+                rasterizer->ScopeMarker("asc[{}]:{}:DispatchDirect",
+                                        fmt::make_format_args(vqid, cmd_address),
+                                        [&] { rasterizer->DispatchDirect(); });
+                break;
+            }
+            case PM4ItOpcode::DispatchIndirect: {
+                const auto* dispatch_indirect =
+                    reinterpret_cast<const PM4CmdDispatchIndirectMec*>(header);
+                auto& cs_program = GetCsRegs();
+                const auto ib_address = dispatch_indirect->Address<VAddr>();
                 const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
-                rasterizer->DispatchIndirect(it->indirect_addr, 0, size);
+                if (DebugState.DumpingCurrentReg()) {
+                    DebugState.PushRegsDumpCompute(base_addr, reinterpret_cast<uintptr_t>(header),
+                                                   cs_program);
+                }
+                if (!rasterizer || (cs_program.dispatch_initiator & 1) == 0) {
+                    break;
+                }
+                const auto cmd_address = reinterpret_cast<const void*>(header);
+                rasterizer->ScopeMarker("asc[{}]:{}:DispatchIndirect",
+                                        fmt::make_format_args(vqid, cmd_address),
+                                        [&] { rasterizer->DispatchIndirect(ib_address, 0, size); });
                 break;
             }
-            auto& cs_program = GetCsRegs();
-            cs_program.dim_x = dispatch_direct->dim_x;
-            cs_program.dim_y = dispatch_direct->dim_y;
-            cs_program.dim_z = dispatch_direct->dim_z;
-            cs_program.dispatch_initiator = dispatch_direct->dispatch_initiator;
-            if (DebugState.DumpingCurrentReg()) {
-                DebugState.PushRegsDumpCompute(base_addr, reinterpret_cast<uintptr_t>(header),
-                                               cs_program);
-            }
-            if (!rasterizer || (cs_program.dispatch_initiator & 1) == 0) {
+            case PM4ItOpcode::WriteData: {
+                const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(header);
+                ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
+                const u32 data_size = (header->type3.count.Value() - 2) * 4;
+                if (!write_data->wr_one_addr.Value()) {
+                    if (rasterizer) {
+                        rasterizer->OnFence();
+                    }
+                    std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
+                } else {
+                    UNREACHABLE();
+                }
                 break;
             }
-            const auto cmd_address = reinterpret_cast<const void*>(header);
-            rasterizer->ScopeMarker("asc[{}]:{}:DispatchDirect",
-                                    fmt::make_format_args(vqid, cmd_address),
-                                    [&] { rasterizer->DispatchDirect(); });
-            break;
-        }
-        case PM4ItOpcode::DispatchIndirect: {
-            const auto* dispatch_indirect =
-                reinterpret_cast<const PM4CmdDispatchIndirectMec*>(header);
-            auto& cs_program = GetCsRegs();
-            const auto ib_address = dispatch_indirect->Address<VAddr>();
-            const auto size = sizeof(PM4CmdDispatchIndirect::GroupDimensions);
-            if (DebugState.DumpingCurrentReg()) {
-                DebugState.PushRegsDumpCompute(base_addr, reinterpret_cast<uintptr_t>(header),
-                                               cs_program);
-            }
-            if (!rasterizer || (cs_program.dispatch_initiator & 1) == 0) {
+            case PM4ItOpcode::MemSemaphore: {
+                const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
+                if (mem_semaphore->IsSignaling()) {
+                    mem_semaphore->Signal();
+                } else {
+                    while (!mem_semaphore->Signaled()) {
+                        YIELD_ASC(vqid);
+                    }
+                    mem_semaphore->Decrement();
+                }
                 break;
             }
-            const auto cmd_address = reinterpret_cast<const void*>(header);
-            rasterizer->ScopeMarker("asc[{}]:{}:DispatchIndirect",
-                                    fmt::make_format_args(vqid, cmd_address),
-                                    [&] { rasterizer->DispatchIndirect(ib_address, 0, size); });
-            break;
-        }
-        case PM4ItOpcode::WriteData: {
-            const auto* write_data = reinterpret_cast<const PM4CmdWriteData*>(header);
-            ASSERT(write_data->dst_sel.Value() == 2 || write_data->dst_sel.Value() == 5);
-            const u32 data_size = (header->type3.count.Value() - 2) * 4;
-            if (!write_data->wr_one_addr.Value()) {
+            case PM4ItOpcode::WaitRegMem: {
+                const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
+                ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
+                while (!wait_reg_mem->Test(regs.reg_array)) {
+                    YIELD_ASC(vqid);
+                }
+                break;
+            }
+            case PM4ItOpcode::ReleaseMem: {
+                const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
                 if (rasterizer) {
                     rasterizer->OnFence();
                 }
-                std::memcpy(write_data->Address<void*>(), write_data->data, data_size);
-            } else {
-                UNREACHABLE();
+                release_mem->SignalFence(
+                    [pipe_id = queue.pipe_id] {
+                        Platform::IrqC::Instance()->Signal(
+                            static_cast<Platform::InterruptId>(pipe_id));
+                    },
+                    [this](VAddr dst, u16 gds_index, u16 num_dwords) {
+                        rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false,
+                                               true);
+                    });
+                break;
             }
-            break;
-        }
-        case PM4ItOpcode::MemSemaphore: {
-            const auto* mem_semaphore = reinterpret_cast<const PM4CmdMemSemaphore*>(header);
-            if (mem_semaphore->IsSignaling()) {
-                mem_semaphore->Signal();
-            } else {
-                while (!mem_semaphore->Signaled()) {
-                    YIELD_ASC(vqid);
-                }
-                mem_semaphore->Decrement();
+            case PM4ItOpcode::EventWrite: {
+                // const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
+                break;
             }
-            break;
-        }
-        case PM4ItOpcode::WaitRegMem: {
-            const auto* wait_reg_mem = reinterpret_cast<const PM4CmdWaitRegMem*>(header);
-            ASSERT(wait_reg_mem->engine.Value() == PM4CmdWaitRegMem::Engine::Me);
-            while (!wait_reg_mem->Test(regs.reg_array)) {
-                YIELD_ASC(vqid);
-            }
-            break;
-        }
-        case PM4ItOpcode::ReleaseMem: {
-            const auto* release_mem = reinterpret_cast<const PM4CmdReleaseMem*>(header);
-            if (rasterizer) {
-                rasterizer->OnFence();
-            }
-            release_mem->SignalFence(
-                [pipe_id = queue.pipe_id] {
-                    Platform::IrqC::Instance()->Signal(static_cast<Platform::InterruptId>(pipe_id));
-                },
-                [this](VAddr dst, u16 gds_index, u16 num_dwords) {
-                    rasterizer->CopyBuffer(dst, gds_index, num_dwords * sizeof(u32), false, true);
-                });
-            break;
-        }
-        case PM4ItOpcode::EventWrite: {
-            // const auto* event = reinterpret_cast<const PM4CmdEventWrite*>(header);
-            break;
-        }
-        default:
-            UNREACHABLE_MSG("Unknown PM4 type 3 opcode {:#x} with count {}",
+            default: {
+                LOG_WARNING(Render, "ASC Unknown PM4 type 3 opcode {:#x} with count {}, skipping",
                             static_cast<u32>(opcode), header->type3.NumWords());
+                break;
+            }
+            }
         }
 
         acb = NextPacket(acb, next_dw_off);

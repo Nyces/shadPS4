@@ -10,7 +10,7 @@
 
 namespace Vulkan {
 
-std::mutex Scheduler::submit_mutex;
+std::recursive_mutex Scheduler::submit_mutex;
 
 Scheduler::Scheduler(const Instance& instance)
     : instance{instance}, work_semaphore{instance}, command_pool{instance, &work_semaphore} {
@@ -183,8 +183,9 @@ void Scheduler::EndSession() {
 }
 
 void Scheduler::SubmitExecution(SubmitInfo& info) {
-    std::scoped_lock lk{submit_mutex};
     const u64 signal_value = work_semaphore.NextTick();
+
+    std::unique_lock lk{submit_mutex};
 
 #if TRACY_GPU_ENABLED
     auto* profiler_ctx = instance.GetProfilerContext();
@@ -240,6 +241,10 @@ void Scheduler::SubmitExecution(SubmitInfo& info) {
     ImGui::Core::TextureManager::Submit();
     auto submit_result = instance.GetGraphicsQueue().submit(submit_info, info.fence);
     ASSERT_MSG(submit_result != vk::Result::eErrorDeviceLost, "Device lost during submit");
+
+    // Release submit_mutex before Refresh/BeginSession/PopPendingOperations to avoid
+    // deadlock if a deferred callback re-enters SubmitExecution on the same thread.
+    lk.unlock();
 
     work_semaphore.Refresh();
     BeginSession();
