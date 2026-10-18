@@ -302,7 +302,7 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             // Type-2 packet are used for padding purposes
             dcb = NextPacket(dcb, 1);
             continue;
-        case 3:
+        case 3: {
             const u32 count = header->type3.NumWords();
             const PM4ItOpcode opcode = header->type3.opcode;
             switch (opcode) {
@@ -925,23 +925,23 @@ Liverpool::Task Liverpool::ProcessGraphics(std::span<const u32> dcb, std::span<c
             dcb = NextPacket(dcb, header->type3.NumWords() + 1);
             break;
         }
-    default: {
-        LOG_WARNING(Render, "GFX Unknown PM4 type {} at addr={:#x}, skipping 1 DWORD", type,
-                    base_addr);
-        dcb = dcb.subspan(1);
-        continue;
+        default: {
+            LOG_WARNING(Render, "GFX Unknown PM4 type {} at addr={:#x}, skipping 1 DWORD", type,
+                        base_addr);
+            dcb = dcb.subspan(1);
+            continue;
+        }
+        }
     }
-    }
-}
 
-if (ce_task.handle) {
-    while (!ce_task.handle.done()) {
-        RESUME_GFX(ce_task);
+    if (ce_task.handle) {
+        while (!ce_task.handle.done()) {
+            RESUME_GFX(ce_task);
+        }
+        ce_task.handle.destroy();
     }
-    ce_task.handle.destroy();
-}
 
-FIBER_EXIT;
+    FIBER_EXIT;
 }
 
 template <bool is_indirect>
