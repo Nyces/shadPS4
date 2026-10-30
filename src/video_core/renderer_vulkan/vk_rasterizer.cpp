@@ -682,7 +682,7 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
                          desc.info.guest_address, hint.width, hint.height, image.info.size.width,
                          image.info.size.height, depth_enlarged, rt_fit_x, rt_fit_y,
                          upscaled_targets.contains(desc.info.guest_address), guest_window_width,
-                         guest_window_height, True(regs.depth_render_control.depth_clear_enable),
+                         guest_window_height, u32(regs.depth_render_control.depth_clear_enable),
                          regs.depth_clear);
             }
         }
