@@ -1732,6 +1732,156 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
     }
 }
 
+void Rasterizer::LogTargetMap(VideoCore::Image& image, u32 which, u32 sample) {
+    constexpr u32 grid_cols = 32;
+    constexpr u32 grid_rows = 18;
+    constexpr u32 grid_cells = grid_cols * grid_rows;
+    const u32 grid_w = image.info.size.width;
+    const u32 grid_h = image.info.size.height;
+    const u32 bpp = image.info.num_bits / 8;
+    const u32 texel = 8;
+    auto& download = buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::Download);
+    const auto [data, base_offset] = download.Map(u64(grid_cells) * texel);
+    download.Commit();
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
+    for (u32 gy = 0; gy < grid_rows; ++gy) {
+        for (u32 gx = 0; gx < grid_cols; ++gx) {
+            const u32 px = std::min(grid_w - 1, (gx * 2 + 1) * grid_w / (grid_cols * 2));
+            const u32 py = std::min(grid_h - 1, (gy * 2 + 1) * grid_h / (grid_rows * 2));
+            const vk::BufferImageCopy copy = {
+                .bufferOffset = base_offset + u64(gy * grid_cols + gx) * texel,
+                .bufferRowLength = 0,
+                .bufferImageHeight = 0,
+                .imageSubresource =
+                    {
+                        .aspectMask = vk::ImageAspectFlagBits::eColor,
+                        .mipLevel = 0,
+                        .baseArrayLayer = 0,
+                        .layerCount = 1,
+                    },
+                .imageOffset = {s32(px), s32(py), 0},
+                .imageExtent = {1, 1, 1},
+            };
+            cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                     download.Handle(), copy);
+        }
+    }
+    scheduler.Finish();
+    const auto half = [](u16 h) -> float {
+        const u32 s = (u32(h >> 15) & 1u) << 31;
+        u32 e = u32(h >> 10) & 0x1Fu;
+        u32 m = u32(h) & 0x3FFu;
+        u32 bits = s;
+        if (e == 0) {
+            if (m != 0) {
+                e = 113;
+                while ((m & 0x400u) == 0) {
+                    m <<= 1;
+                    --e;
+                }
+                m &= 0x3FFu;
+                bits = s | (e << 23) | (m << 13);
+            }
+        } else if (e == 31) {
+            bits = s | 0x7F800000u | (m << 13);
+        } else {
+            bits = s | ((e + 112u) << 23) | (m << 13);
+        }
+        return std::bit_cast<float>(bits);
+    };
+    const auto shade = [](float l) -> char {
+        if (l < 0.02f) {
+            return ' ';
+        }
+        if (l < 0.06f) {
+            return '.';
+        }
+        if (l < 0.12f) {
+            return ':';
+        }
+        if (l < 0.25f) {
+            return '+';
+        }
+        if (l < 0.45f) {
+            return '*';
+        }
+        if (l < 0.70f) {
+            return '#';
+        }
+        return '@';
+    };
+    std::array<float, grid_cells> lum{};
+    for (u32 gy = 0; gy < grid_rows; ++gy) {
+        for (u32 gx = 0; gx < grid_cols; ++gx) {
+            const u8* src = data + (gy * grid_cols + gx) * texel;
+            float v = 0.0f;
+            if (bpp == 8) {
+                const u16 r = u16(src[0]) | (u16(src[1]) << 8);
+                const u16 g = u16(src[2]) | (u16(src[3]) << 8);
+                const u16 b = u16(src[4]) | (u16(src[5]) << 8);
+                v = (half(r) + half(g) + half(b)) / 3.0f;
+            } else if (bpp == 4) {
+                v = (float(src[0]) + float(src[1]) + float(src[2])) / 765.0f;
+            }
+            lum[gy * grid_cols + gx] = v;
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Layer map: addr={:#x} {}x{} bpp={} pitch={} w{} sample={}",
+             image.info.guest_address, grid_w, grid_h, bpp, image.info.pitch, which, sample);
+    std::string cols;
+    for (u32 gx = 0; gx < grid_cols; ++gx) {
+        float sum = 0.0f;
+        for (u32 gy = 0; gy < grid_rows; ++gy) {
+            sum += lum[gy * grid_cols + gx];
+        }
+        cols += fmt::format("{:.2f} ", sum / float(grid_rows));
+    }
+    LOG_INFO(Render_Vulkan, "Layer cols: addr={:#x} w{} {}", image.info.guest_address, which, cols);
+    std::string rows;
+    for (u32 gy = 0; gy < grid_rows; ++gy) {
+        float sum = 0.0f;
+        for (u32 gx = 0; gx < grid_cols; ++gx) {
+            sum += lum[gy * grid_cols + gx];
+        }
+        rows += fmt::format("{:.2f} ", sum / float(grid_cols));
+    }
+    LOG_INFO(Render_Vulkan, "Layer rows: addr={:#x} w{} {}", image.info.guest_address, which, rows);
+    // Emit the whole map as a single message. The logger drops messages beyond a per-second
+    // budget, so one message per row kept only the first and left the maps unreadable.
+    std::string art;
+    for (u32 gy = 0; gy < grid_rows; ++gy) {
+        art += '\n';
+        for (u32 gx = 0; gx < grid_cols; ++gx) {
+            art += shade(lum[gy * grid_cols + gx]);
+        }
+    }
+    LOG_INFO(Render_Vulkan, "Layer art w{} s{}:{}", which, sample, art);
+}
+
+void Rasterizer::DumpSceneTargets() {
+    static u32 frames = 0;
+    if (++frames % 120 != 10) {
+        return;
+    }
+    // Read the scene targets once the frame is complete. Sampling them when they are bound as
+    // textures runs before they are rendered, so it can only see nothing or the previous frame.
+    static constexpr std::array<u64, 4> kAddrs = {0x20f0c0000ull, 0x209340000ull, 0x207140000ull,
+                                                  0x208240000ull};
+    for (u32 i = 0; i < kAddrs.size(); ++i) {
+        const auto id = texture_cache.FindImageFromRange(kAddrs[i], 0x1000, false);
+        if (!id) {
+            continue;
+        }
+        auto& image = texture_cache.GetImage(id);
+        if (u64(image.info.guest_address) != kAddrs[i] || image.info.size.width < 1920) {
+            continue;
+        }
+        LogTargetMap(image, i + 20, frames);
+    }
+}
+
 void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding) {
     image_bindings.clear();
     const u32 first_image_idx = image_infos.size();
@@ -1887,143 +2037,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     (enlarged && logged == 0) || (hits % 100 == 1 && logged < 8);
                 if (sample_now) {
                     grid_logs[slot] = logged + 1;
-                    constexpr u32 grid_cols = 32;
-                    constexpr u32 grid_rows = 18;
-                    constexpr u32 grid_cells = grid_cols * grid_rows;
-                    const u32 grid_w = image.info.size.width;
-                    const u32 grid_h = image.info.size.height;
-                    const u32 bpp = image.info.num_bits / 8;
-                    const u32 texel = 8;
-                    auto& download =
-                        buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::Download);
-                    const auto [data, base_offset] = download.Map(u64(grid_cells) * texel);
-                    download.Commit();
-                    scheduler.EndRendering();
-                    const auto cmdbuf = scheduler.CommandBuffer();
-                    image.Transit(vk::ImageLayout::eTransferSrcOptimal,
-                                  vk::AccessFlagBits2::eTransferRead, {});
-                    for (u32 gy = 0; gy < grid_rows; ++gy) {
-                        for (u32 gx = 0; gx < grid_cols; ++gx) {
-                            const u32 px =
-                                std::min(grid_w - 1, (gx * 2 + 1) * grid_w / (grid_cols * 2));
-                            const u32 py =
-                                std::min(grid_h - 1, (gy * 2 + 1) * grid_h / (grid_rows * 2));
-                            const vk::BufferImageCopy copy = {
-                                .bufferOffset = base_offset + u64(gy * grid_cols + gx) * texel,
-                                .bufferRowLength = 0,
-                                .bufferImageHeight = 0,
-                                .imageSubresource =
-                                    {
-                                        .aspectMask = vk::ImageAspectFlagBits::eColor,
-                                        .mipLevel = 0,
-                                        .baseArrayLayer = 0,
-                                        .layerCount = 1,
-                                    },
-                                .imageOffset = {s32(px), s32(py), 0},
-                                .imageExtent = {1, 1, 1},
-                            };
-                            cmdbuf.copyImageToBuffer(image.GetImage(),
-                                                     vk::ImageLayout::eTransferSrcOptimal,
-                                                     download.Handle(), copy);
-                        }
-                    }
-                    scheduler.Finish();
-                    const auto half = [](u16 h) -> float {
-                        const u32 s = (u32(h >> 15) & 1u) << 31;
-                        u32 e = u32(h >> 10) & 0x1Fu;
-                        u32 m = u32(h) & 0x3FFu;
-                        u32 bits = s;
-                        if (e == 0) {
-                            if (m != 0) {
-                                e = 113;
-                                while ((m & 0x400u) == 0) {
-                                    m <<= 1;
-                                    --e;
-                                }
-                                m &= 0x3FFu;
-                                bits = s | (e << 23) | (m << 13);
-                            }
-                        } else if (e == 31) {
-                            bits = s | 0x7F800000u | (m << 13);
-                        } else {
-                            bits = s | ((e + 112u) << 23) | (m << 13);
-                        }
-                        return std::bit_cast<float>(bits);
-                    };
-                    const auto shade = [](float l) -> char {
-                        if (l < 0.02f) {
-                            return ' ';
-                        }
-                        if (l < 0.06f) {
-                            return '.';
-                        }
-                        if (l < 0.12f) {
-                            return ':';
-                        }
-                        if (l < 0.25f) {
-                            return '+';
-                        }
-                        if (l < 0.45f) {
-                            return '*';
-                        }
-                        if (l < 0.70f) {
-                            return '#';
-                        }
-                        return '@';
-                    };
-                    std::array<float, grid_cells> lum{};
-                    for (u32 gy = 0; gy < grid_rows; ++gy) {
-                        for (u32 gx = 0; gx < grid_cols; ++gx) {
-                            const u8* src = data + (gy * grid_cols + gx) * texel;
-                            float v = 0.0f;
-                            if (bpp == 8) {
-                                const u16 r = u16(src[0]) | (u16(src[1]) << 8);
-                                const u16 g = u16(src[2]) | (u16(src[3]) << 8);
-                                const u16 b = u16(src[4]) | (u16(src[5]) << 8);
-                                v = (half(r) + half(g) + half(b)) / 3.0f;
-                            } else if (bpp == 4) {
-                                v = (float(src[0]) + float(src[1]) + float(src[2])) / 765.0f;
-                            }
-                            lum[gy * grid_cols + gx] = v;
-                        }
-                    }
-                    LOG_INFO(Render_Vulkan,
-                             "Layer map: addr={:#x} {}x{} bpp={} pitch={} bound={}x{} sample={}",
-                             image.info.guest_address, grid_w, grid_h, bpp, image.info.pitch,
-                             desc.info.size.width, desc.info.size.height, logged + 1);
-                    // The exact boundary of a layer that stops short matters more than its
-                    // appearance, so report the per-column and per-row means as numbers too.
-                    std::string cols;
-                    for (u32 gx = 0; gx < grid_cols; ++gx) {
-                        float sum = 0.0f;
-                        for (u32 gy = 0; gy < grid_rows; ++gy) {
-                            sum += lum[gy * grid_cols + gx];
-                        }
-                        cols += fmt::format("{:.2f} ", sum / float(grid_rows));
-                    }
-                    LOG_INFO(Render_Vulkan, "Layer cols: addr={:#x} {}", image.info.guest_address,
-                             cols);
-                    std::string rows;
-                    for (u32 gy = 0; gy < grid_rows; ++gy) {
-                        float sum = 0.0f;
-                        for (u32 gx = 0; gx < grid_cols; ++gx) {
-                            sum += lum[gy * grid_cols + gx];
-                        }
-                        rows += fmt::format("{:.2f} ", sum / float(grid_cols));
-                    }
-                    LOG_INFO(Render_Vulkan, "Layer rows: addr={:#x} {}", image.info.guest_address,
-                             rows);
-                    // Emit the whole map as a single message. The logger drops messages beyond
-                    // a per-second budget, so one message per row lost all but the first and
-                    // left the maps unreadable.
-                    std::string art;
-                    for (u32 gy = 0; gy < grid_rows; ++gy) {
-                        art += '\n';
-                        for (u32 gx = 0; gx < grid_cols; ++gx) {
-                            art += shade(lum[gy * grid_cols + gx]);
-                        }
-                    }
-                    LOG_INFO(Render_Vulkan, "Layer art w{} s{}:{}", which, logged + 1, art);
+                    LogTargetMap(image, which, logged + 1);
                 }
             }
 

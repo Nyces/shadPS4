@@ -700,6 +700,10 @@ Frame* Presenter::PrepareFrame(const Libraries::VideoOut::BufferAttributeGroup& 
     const auto image_id = texture_cache.FindImage(desc);
     texture_cache.UpdateImage(image_id);
 
+    // TEMPORARY DIAGNOSTIC: the frame is complete here, so this is the only point where the
+    // scene targets can be read back after everything that writes them has run.
+    rasterizer->DumpSceneTargets();
+
     Frame* frame = GetRenderFrame();
 
     const auto frame_subresources = vk::ImageSubresourceRange{
