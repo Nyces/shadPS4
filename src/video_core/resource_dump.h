@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <span>
+
 #include "common/types.h"
 
 namespace Core {
@@ -25,26 +27,30 @@ namespace VideoCore {
 bool ShouldDumpDrawResources();
 
 /**
- * Writes the resource descriptors of one shader stage of one draw into the log
+ * Writes one draw call's shader resources into the log
  * (``<user>/log/shad_log.txt``) with a ``RESDUMP|`` prefix.
  *
  * A RenderDoc capture records what the GPU was told to do, but not which guest
  * address a descriptor resolves to, so the constants the character shaders read
  * out of storage buffers stay out of reach of a capture. Inside the emulator
- * both halves are available: the recompiled stage carries the V# descriptors
+ * both halves are available: the recompiled stage carries the V#/T# descriptors
  * and the guest memory behind them can be read directly.
  *
- * Three line kinds are emitted:
- *  * ``RESDUMP|meta|f<frame>|e<entry>|<stage>|hash=..|ud=..`` once per stage,
- *    with the 16 user-data SGPRs the shader received;
- *  * ``RESDUMP|buf|..|b<binding>|addr=..|size=..|stride=..|rec=..|w=..`` per
- *    bound guest buffer;
+ * Lines emitted per draw:
+ *  * ``RESDUMP|draw|f<frame>|d<draw>|ps=..;vs=..`` one line tying the stages of
+ *    this draw together, which a per-stage log cannot express;
+ *  * ``RESDUMP|ud|f<frame>|d<draw>|<stage>|hash=..|<16 dwords>`` the user-data
+ *    SGPRs, logged per draw because they change with the draw;
+ *  * ``RESDUMP|buf|..|b<binding>|addr=..|size=..|stride=..|rec=..|w=..`` and
+ *    ``RESDUMP|img|..|i<binding>|addr=..|w=..|h=..|fmt=..|nf=..|pitch=..|type=..``
+ *    for every bound guest buffer and texture;
  *  * ``RESDUMP|hex|..|c<first dword>|<dwords>`` for buffers small enough to
  *    hold constants (see MAX_CONTENT_BYTES), split over several lines.
  *
+ * Image dimensions are the raw T# fields, i.e. one less than the real size.
  * Buffer contents are written once per distinct block, so a material shared by
  * a hundred draws and by every captured frame costs one copy, not a hundred.
  */
-void DumpDrawResources(const Shader::Info& stage, Core::MemoryManager* memory);
+void DumpDrawResources(std::span<const Shader::Info* const> stages, Core::MemoryManager* memory);
 
 } // namespace VideoCore

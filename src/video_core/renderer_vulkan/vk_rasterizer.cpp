@@ -417,8 +417,8 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    const bool dump_resources = VideoCore::ShouldDumpDrawResources();
-    for (const auto* stage : pipeline->GetStages()) {
+    const auto draw_stages = pipeline->GetStages();
+    for (const auto* stage : draw_stages) {
         if (!stage) {
             continue;
         }
@@ -426,12 +426,14 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                           stage->samplers.size());
         BindBuffers(*stage, binding, push_data);
         BindTextures(*stage, binding);
-        if (dump_resources) {
-            // Read the descriptors back out of guest memory: a RenderDoc capture
-            // cannot say which address the material constants live at.
-            VideoCore::DumpDrawResources(*stage, memory);
-        }
         uses_dma |= stage->uses_dma;
+    }
+
+    if (VideoCore::ShouldDumpDrawResources()) {
+        // Read the descriptors back out of guest memory, with the stage pairing:
+        // a RenderDoc capture cannot say which address the constants live at,
+        // and a per-stage log cannot say which pixel shader draws them.
+        VideoCore::DumpDrawResources(draw_stages, memory);
     }
 
     if (uses_dma) {

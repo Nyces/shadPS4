@@ -47,11 +47,10 @@ struct CaptureState {
     std::mutex mutex;
     /// Distinct buffer blocks already printed, keyed by their content hash.
     std::unordered_set<u64> printed;
-    /// Distinct (stage, shader) pairs announced for the current frame, mapped
-    /// to the entry number their buffer lines carry.
-    std::unordered_map<u64, u32> announced;
+    /// Image descriptors already printed for the current frame.
+    std::unordered_set<u64> images;
     u32 frame = ~0u;
-    u32 entries = 0;
+    u32 draws = 0;
     std::atomic<u64> content{0};
     bool auto_started = false;
 };
@@ -103,7 +102,8 @@ u64 ContentHash(const u8* data, u64 size) {
     return hash;
 }
 
-void LogContent(u32 frame, const char* stage, u32 binding, u64 hash, const u8* data, u64 size) {
+void LogContent(u32 frame, u32 draw, const char* stage, u32 binding, u64 hash, const u8* data,
+                u64 size) {
     const u64 dwords = size / sizeof(u32);
     for (u64 first = 0; first < dwords; first += DWORDS_PER_LINE) {
         std::string text;
@@ -116,8 +116,8 @@ void LogContent(u32 frame, const char* stage, u32 binding, u64 hash, const u8* d
             std::memcpy(&value, data + index * sizeof(u32), sizeof(u32));
             text += fmt::format("{:08x}", value);
         }
-        LOG_INFO(Render_Vulkan, "RESDUMP|hex|f{}|{}|b{}|hash={:#x}|c{}|{}", frame, stage, binding,
-                 hash, first, text);
+        LOG_INFO(Render_Vulkan, "RESDUMP|hex|f{}|d{}|{}|b{}|hash={:#x}|c{}|{}", frame, draw, stage,
+                 binding, hash, first, text);
     }
 }
 
@@ -138,73 +138,107 @@ bool ShouldDumpDrawResources() {
     return IsAutoCaptureFrame();
 }
 
-void DumpDrawResources(const Shader::Info& stage, Core::MemoryManager* memory) {
+void DumpDrawResources(std::span<const Shader::Info* const> stages, Core::MemoryManager* memory) {
     if (!ShouldDumpDrawResources()) {
         return;
     }
 
     auto& state = State();
     const u32 frame = DebugState.GetFrameNum();
-    const char* name = StageName(stage.sw_stage);
     const bool auto_capture = IsAutoCaptureFrame();
 
     std::lock_guard lock{state.mutex};
     if (state.frame != frame) {
         state.frame = frame;
-        state.entries = 0;
-        state.announced.clear();
+        state.draws = 0;
+        state.images.clear();
     }
     if (auto_capture && !state.auto_started) {
         state.auto_started = true;
         LOG_INFO(Render_Vulkan, "RESDUMP|auto|automatic capture starts at frame {}", frame);
     }
+    const u32 draw = ++state.draws;
 
-    // Announce each distinct shader once per frame: a scene draws the same
-    // character shader hundreds of times and the user data repeats with it.
-    const u64 announce_key = Mix(Mix(1, static_cast<u64>(stage.sw_stage)), stage.pgm_hash);
-    const auto [it, added] = state.announced.try_emplace(announce_key, state.entries + 1);
-    if (added) {
-        ++state.entries;
-        LOG_INFO(Render_Vulkan, "RESDUMP|meta|f{}|e{}|{}|hash={:#x}|ud={}", frame, state.entries,
-                 name, stage.pgm_hash, UserDataString(stage));
+    // One line per draw: the per-stage lines below cannot say which pixel and
+    // vertex shader ran together, and the pairing is what identifies a shader.
+    std::string summary;
+    for (const auto* stage : stages) {
+        if (stage == nullptr) {
+            continue;
+        }
+        if (!summary.empty()) {
+            summary += ';';
+        }
+        summary += fmt::format("{}={:#x}", StageName(stage->sw_stage), stage->pgm_hash);
     }
-    const u32 entry = it->second;
+    LOG_INFO(Render_Vulkan, "RESDUMP|draw|f{}|d{}|{}", frame, draw, summary);
 
-    for (size_t index = 0; index < stage.buffers.size(); ++index) {
-        const auto& desc = stage.buffers[index];
-        if (desc.IsSpecial()) {
+    for (const auto* stage : stages) {
+        if (stage == nullptr) {
             continue;
         }
-        const auto vsharp = desc.GetSharp(stage);
-        if (!vsharp || vsharp.base_address == 0) {
-            continue;
+        const char* name = StageName(stage->sw_stage);
+        LOG_INFO(Render_Vulkan, "RESDUMP|ud|f{}|d{}|{}|hash={:#x}|{}", frame, draw, name,
+                 stage->pgm_hash, UserDataString(*stage));
+
+        for (size_t index = 0; index < stage->buffers.size(); ++index) {
+            const auto& desc = stage->buffers[index];
+            if (desc.IsSpecial()) {
+                continue;
+            }
+            const auto vsharp = desc.GetSharp(*stage);
+            if (!vsharp || vsharp.base_address == 0) {
+                continue;
+            }
+
+            const u32 binding = static_cast<u32>(index);
+            const u64 address = vsharp.base_address;
+            LOG_INFO(Render_Vulkan,
+                     "RESDUMP|buf|f{}|d{}|{}|b{}|hash={:#x}|addr={:#x}|size={}|stride={}|rec={}"
+                     "|w={}",
+                     frame, draw, name, binding, stage->pgm_hash, address, vsharp.GetSize(),
+                     vsharp.GetStride(), vsharp.num_records, desc.is_written);
+
+            const u64 size = std::min<u64>(vsharp.GetSize(), MAX_CONTENT_BYTES);
+            if (size < sizeof(u32) || size % sizeof(u32) != 0) {
+                continue;
+            }
+            if (state.content.load(std::memory_order_relaxed) + size > MAX_TOTAL_CONTENT) {
+                continue;
+            }
+            std::vector<u8> bytes(size);
+            memory->CopySparseMemory(address, bytes.data(), size);
+
+            // One copy per distinct block: materials are bound by many draws and
+            // by every captured frame, but the bytes only need to be in the log
+            // once.
+            if (!state.printed.insert(ContentHash(bytes.data(), size)).second) {
+                continue;
+            }
+            state.content.fetch_add(size, std::memory_order_relaxed);
+            LogContent(frame, draw, name, binding, stage->pgm_hash, bytes.data(), size);
         }
 
-        const u32 binding = static_cast<u32>(index);
-        const u64 address = vsharp.base_address;
-        LOG_INFO(Render_Vulkan,
-                 "RESDUMP|buf|f{}|e{}|{}|b{}|hash={:#x}|addr={:#x}|size={}|stride={}|rec={}|w={}",
-                 frame, entry, name, binding, stage.pgm_hash, address, vsharp.GetSize(),
-                 vsharp.GetStride(), vsharp.num_records, desc.is_written);
-
-        const u64 size = std::min<u64>(vsharp.GetSize(), MAX_CONTENT_BYTES);
-        if (size < sizeof(u32) || size % sizeof(u32) != 0) {
-            continue;
+        for (size_t index = 0; index < stage->images.size(); ++index) {
+            const auto& desc = stage->images[index];
+            const auto image = desc.GetSharp(*stage);
+            if (!image || image.base_address == 0) {
+                continue;
+            }
+            const u64 image_address = image.Address();
+            const u64 key =
+                Mix(Mix(Mix(2, static_cast<u64>(stage->sw_stage)), stage->pgm_hash), image_address);
+            if (!state.images.insert(Mix(key, index)).second) {
+                continue;
+            }
+            LOG_INFO(Render_Vulkan,
+                     "RESDUMP|img|f{}|d{}|{}|i{}|hash={:#x}|addr={:#x}|w={}|h={}|fmt={}|nf={}"
+                     "|pitch={}|type={}",
+                     frame, draw, name, static_cast<u32>(index), stage->pgm_hash, image_address,
+                     static_cast<u32>(image.width), static_cast<u32>(image.height),
+                     static_cast<u32>(image.data_format), static_cast<u32>(image.num_format),
+                     static_cast<u32>(image.pitch), static_cast<u32>(image.type));
         }
-        if (state.content.load(std::memory_order_relaxed) + size > MAX_TOTAL_CONTENT) {
-            continue;
-        }
-
-        std::vector<u8> bytes(size);
-        memory->CopySparseMemory(address, bytes.data(), size);
-
-        // One copy per distinct block: materials are bound by many draws and by
-        // every captured frame, but the bytes only need to be in the log once.
-        if (!state.printed.insert(ContentHash(bytes.data(), size)).second) {
-            continue;
-        }
-        state.content.fetch_add(size, std::memory_order_relaxed);
-        LogContent(frame, name, binding, stage.pgm_hash, bytes.data(), size);
     }
 }
 
