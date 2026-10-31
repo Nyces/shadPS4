@@ -1883,7 +1883,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 const u32 logged = grid_logs[slot];
                 const bool enlarged = image.info.size.width >= 3840;
                 const bool sample_now =
-                    (enlarged && logged == 0) || (hits % 400 == 1 && logged < 4);
+                    (enlarged && logged == 0) || (hits % 100 == 1 && logged < 8);
                 if (sample_now) {
                     grid_logs[slot] = logged + 1;
                     constexpr u32 grid_cols = 32;
@@ -2017,7 +2017,11 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         for (u32 gx = 0; gx < grid_cols; ++gx) {
                             line += shade(lum[gy * grid_cols + gx]);
                         }
-                        LOG_INFO(Render_Vulkan, "Layer map |{}|", line);
+                        // Every row carries its own index: the logger drops consecutive
+                        // identical messages, and the blank rows of a half-filled target are
+                        // exactly that, which silently truncated the map.
+                        LOG_INFO(Render_Vulkan, "Layer map {}:{} s{} |{}|", which, logged + 1, gy,
+                                 line);
                     }
                 }
             }
