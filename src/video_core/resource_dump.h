@@ -16,16 +16,22 @@ struct Info;
 namespace VideoCore {
 
 /**
- * Writes the resource descriptors of one shader stage of one draw to
- * ``<user>/resource_dump``.
+ * Writes the resource descriptors of one shader stage of one draw into the log
+ * (``<user>/log/shad_log.txt``) with a ``RESDUMP|`` prefix.
  *
  * A RenderDoc capture records what the GPU was told to do, but not which guest
  * address a descriptor resolves to, so the constants the character shaders read
  * out of storage buffers stay out of reach of a capture. Inside the emulator
  * both halves are available: the recompiled stage carries the V# descriptors
- * and the guest memory behind them can be read directly. Each dump appends one
- * JSONL line (stage, shader hash, user data, every bound buffer with its
- * address, size and stride) plus one raw ``.bin`` per buffer.
+ * and the guest memory behind them can be read directly.
+ *
+ * Three line kinds are emitted:
+ *  * ``RESDUMP|meta|f<frame>|e<entry>|<stage>|hash=..|ud=..`` once per stage,
+ *    with the 16 user-data SGPRs the shader received;
+ *  * ``RESDUMP|buf|..|b<binding>|addr=..|size=..|stride=..|rec=..|w=..`` per
+ *    bound guest buffer;
+ *  * ``RESDUMP|hex|..|c<first dword>|<dwords>`` for buffers small enough to
+ *    hold constants (see MAX_CONTENT_BYTES), split over several lines.
  *
  * The dump runs for the frames requested by
  * ``DebugState.RequestResourceDump()``.
