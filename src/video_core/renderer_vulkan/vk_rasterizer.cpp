@@ -452,6 +452,19 @@ void Rasterizer::BindVertexBuffers(const GraphicsPipeline* pipeline) {
     pipeline->GetVertexInputs(attributes, bindings, divisors, guest_buffers,
                               regs.vgt_instance_step_rate_0, regs.vgt_instance_step_rate_1);
 
+    if (VideoCore::ShouldDumpDrawResources()) {
+        // The fetch shader is the only place that knows which vertex channel
+        // feeds which shader input, so record its bindings once per frame.
+        for (size_t semantic = 0; semantic < guest_buffers.size(); ++semantic) {
+            const auto& buffer = guest_buffers[semantic];
+            VideoCore::DumpVertexInput(
+                static_cast<u32>(semantic), static_cast<u64>(buffer.base_address),
+                static_cast<u64>(buffer.GetStride()), static_cast<u64>(buffer.num_records),
+                static_cast<u32>(buffer.data_format), static_cast<u32>(buffer.num_format),
+                static_cast<u32>(attributes[semantic].format));
+        }
+    }
+
     if (instance.IsVertexInputDynamicState()) {
         // Update current vertex inputs.
         const auto cmdbuf = scheduler.CommandBuffer();

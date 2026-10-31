@@ -49,6 +49,8 @@ struct CaptureState {
     std::unordered_set<u64> printed;
     /// Image descriptors already printed for the current frame.
     std::unordered_set<u64> images;
+    /// Vertex attribute bindings already printed for the current frame.
+    std::unordered_set<u64> vertices;
     u32 frame = ~0u;
     u32 draws = 0;
     std::atomic<u64> content{0};
@@ -138,6 +140,30 @@ bool ShouldDumpDrawResources() {
     return IsAutoCaptureFrame();
 }
 
+void DumpVertexInput(u32 location, u64 address, u64 stride, u64 records, u32 data_format,
+                     u32 num_format, u32 vk_format) {
+    if (!ShouldDumpDrawResources()) {
+        return;
+    }
+
+    auto& state = State();
+    const u32 frame = DebugState.GetFrameNum();
+
+    std::lock_guard lock{state.mutex};
+    if (state.frame != frame) {
+        state.frame = frame;
+        state.draws = 0;
+        state.images.clear();
+        state.vertices.clear();
+    }
+    const u64 key = Mix(Mix(Mix(Mix(3, location), address), stride), records);
+    if (!state.vertices.insert(key).second) {
+        return;
+    }
+    LOG_INFO(Render_Vulkan, "RESDUMP|vtx|f{}|a{}|addr={:#x}|stride={}|rec={}|fmt={}|nf={}|vk={}",
+             frame, location, address, stride, records, data_format, num_format, vk_format);
+}
+
 void DumpDrawResources(std::span<const Shader::Info* const> stages, Core::MemoryManager* memory) {
     if (!ShouldDumpDrawResources()) {
         return;
@@ -152,6 +178,7 @@ void DumpDrawResources(std::span<const Shader::Info* const> stages, Core::Memory
         state.frame = frame;
         state.draws = 0;
         state.images.clear();
+        state.vertices.clear();
     }
     if (auto_capture && !state.auto_started) {
         state.auto_started = true;

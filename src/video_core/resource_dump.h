@@ -53,4 +53,20 @@ bool ShouldDumpDrawResources();
  */
 void DumpDrawResources(std::span<const Shader::Info* const> stages, Core::MemoryManager* memory);
 
+/**
+ * Logs one vertex attribute binding (the V# the fetch shader uses for semantic
+ * *location*)
+ * once per frame.
+ *
+ * The stride-84 character vertices carry position, normal, UV0 and a few
+ * signed
+ * pairs, but not the attributes the pixel shader samples with; those are
+ * computed by
+ * the vertex shader from inputs whose offsets only the fetch shader
+ * knows. Logging the binding
+ * makes that mapping explicit instead of guessed.
+ */
+void DumpVertexInput(u32 location, u64 address, u64 stride, u64 records, u32 data_format,
+                     u32 num_format, u32 vk_format);
+
 } // namespace VideoCore
