@@ -417,7 +417,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     // Bind resource buffers and textures.
     Shader::Backend::Bindings binding{};
     push_data = MakeUserData(liverpool->regs);
-    const bool dump_resources = DebugState.DumpingResources();
+    const bool dump_resources = VideoCore::ShouldDumpDrawResources();
     for (const auto* stage : pipeline->GetStages()) {
         if (!stage) {
             continue;

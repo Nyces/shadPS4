@@ -202,6 +202,10 @@ struct TrophyContext {
     u32 service_label;
     u32 user_id;
     bool registered = false;
+    /// The guest retries RegisterContext from its own trophy thread, so the
+    /// two "cannot set up trophies" messages are only worth printing once.
+    bool missing_title_logged = false;
+    bool missing_files_logged = false;
     std::filesystem::path trophy_xml_path; // resolved once at CreateContext
     std::filesystem::path xml_dir;         // .../Xml/
     std::filesystem::path xml_save_file;   // The actual file for tracking progress per-user.
@@ -915,12 +919,18 @@ int PS4_SYSV_ABI sceNpTrophyRegisterContext(OrbisNpTrophyContext context,
         ctx.trophy_xml_path = GetTrophyXmlPath(ctx.xml_dir, EmulatorSettings.GetConsoleLanguage());
 
         if (!std::filesystem::exists(ctx.trophy_xml_path)) {
-            LOG_ERROR(Lib_NpTrophy, "Could not find trophy files.");
+            if (!ctx.missing_files_logged) {
+                ctx.missing_files_logged = true;
+                LOG_ERROR(Lib_NpTrophy, "Could not find trophy files.");
+            }
             // Stub success here to prevent issues specific to missing a trophy key.
         }
     } else {
-        LOG_ERROR(Lib_NpTrophy, "No npCommId found for trophy index/service_label: {}",
-                  ctx.service_label);
+        if (!ctx.missing_title_logged) {
+            ctx.missing_title_logged = true;
+            LOG_ERROR(Lib_NpTrophy, "No npCommId found for trophy index/service_label: {}",
+                      ctx.service_label);
+        }
         return ORBIS_NP_UTIL_ERROR_INVALID_TITLEID;
     }
 

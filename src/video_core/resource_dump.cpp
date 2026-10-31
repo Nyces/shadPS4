@@ -4,8 +4,11 @@
 #include "video_core/resource_dump.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -13,6 +16,7 @@
 
 #include "common/logging/log.h"
 #include "core/debug_state.h"
+#include "core/emulator_settings.h"
 #include "core/memory.h"
 #include "shader_recompiler/info.h"
 
@@ -20,26 +24,40 @@ namespace VideoCore {
 
 namespace {
 
+/// Frames to wait before the automatic capture starts, so the splash screens
+/// and the menus do not fill the log.
+constexpr u32 AUTO_DELAY = 600;
+
+/// One capture window every this many frames, and how many frames it lasts.
+constexpr u32 AUTO_PERIOD = 900;
+constexpr u32 AUTO_WINDOW = 2;
+
 /// Only small blocks are printed in full: material constants and uniform
 /// buffers fit, while vertex, index and bone-matrix buffers only get their
 /// descriptor logged.
 constexpr u64 MAX_CONTENT_BYTES = 2_KB;
 
-/// Ceiling for one frame, so a runaway dump cannot eat the log file budget.
-constexpr u64 MAX_FRAME_CONTENT = 4_MB;
+/// Total amount of buffer bytes printed over the whole run.
+constexpr u64 MAX_TOTAL_CONTENT = 24_MB;
 
 /// Dwords per printed line, so no single log line turns into a wall of hex.
 constexpr u64 DWORDS_PER_LINE = 16;
 
-struct FrameState {
+struct CaptureState {
+    std::mutex mutex;
+    /// Distinct buffer blocks already printed, keyed by their content hash.
+    std::unordered_set<u64> printed;
+    /// Distinct (stage, shader) pairs announced for the current frame, mapped
+    /// to the entry number their buffer lines carry.
+    std::unordered_map<u64, u32> announced;
     u32 frame = ~0u;
     u32 entries = 0;
-    u64 content = 0;
-    std::unordered_set<u64> seen;
+    std::atomic<u64> content{0};
+    bool auto_started = false;
 };
 
-FrameState& State() {
-    static FrameState state;
+CaptureState& State() {
+    static CaptureState state;
     return state;
 }
 
@@ -73,15 +91,16 @@ std::string UserDataString(const Shader::Info& stage) {
     return text;
 }
 
-/// One key per distinct (stage, shader, buffer), so the same material block
-/// bound by a hundred draws is printed once per frame instead of a hundred
-/// times.
-u64 BufferKey(Shader::SwStage stage, u64 hash, u64 address, u64 size) {
-    u64 key = static_cast<u64>(stage) + 1;
-    key = key * 0x100000001b3ULL ^ hash;
-    key = key * 0x100000001b3ULL ^ address;
-    key = key * 0x100000001b3ULL ^ size;
-    return key;
+u64 Mix(u64 value, u64 add) {
+    return (value ^ add) * 0x100000001b3ULL;
+}
+
+u64 ContentHash(const u8* data, u64 size) {
+    u64 hash = 0xcbf29ce484222325ULL;
+    for (u64 index = 0; index < size; ++index) {
+        hash = (hash ^ data[index]) * 0x100000001b3ULL;
+    }
+    return hash;
 }
 
 void LogContent(u32 frame, const char* stage, u32 binding, u64 hash, const u8* data, u64 size) {
@@ -102,22 +121,54 @@ void LogContent(u32 frame, const char* stage, u32 binding, u64 hash, const u8* d
     }
 }
 
+bool IsAutoCaptureFrame() {
+    if (!EmulatorSettings.IsResourceDumpAuto()) {
+        return false;
+    }
+    const u32 frame = DebugState.GetFrameNum();
+    if (frame < AUTO_DELAY) {
+        return false;
+    }
+    return (frame - AUTO_DELAY) % AUTO_PERIOD < AUTO_WINDOW;
+}
+
 } // namespace
 
+bool ShouldDumpDrawResources() {
+    return IsAutoCaptureFrame();
+}
+
 void DumpDrawResources(const Shader::Info& stage, Core::MemoryManager* memory) {
+    if (!ShouldDumpDrawResources()) {
+        return;
+    }
+
     auto& state = State();
     const u32 frame = DebugState.GetFrameNum();
+    const char* name = StageName(stage.sw_stage);
+    const bool auto_capture = IsAutoCaptureFrame();
+
+    std::lock_guard lock{state.mutex};
     if (state.frame != frame) {
         state.frame = frame;
         state.entries = 0;
-        state.content = 0;
-        state.seen.clear();
+        state.announced.clear();
     }
-    const u32 entry = ++state.entries;
+    if (auto_capture && !state.auto_started) {
+        state.auto_started = true;
+        LOG_INFO(Render_Vulkan, "RESDUMP|auto|automatic capture starts at frame {}", frame);
+    }
 
-    const char* name = StageName(stage.sw_stage);
-    LOG_INFO(Render_Vulkan, "RESDUMP|meta|f{}|e{}|{}|hash={:#x}|ud={}", frame, entry, name,
-             stage.pgm_hash, UserDataString(stage));
+    // Announce each distinct shader once per frame: a scene draws the same
+    // character shader hundreds of times and the user data repeats with it.
+    const u64 announce_key = Mix(Mix(1, static_cast<u64>(stage.sw_stage)), stage.pgm_hash);
+    const auto [it, added] = state.announced.try_emplace(announce_key, state.entries + 1);
+    if (added) {
+        ++state.entries;
+        LOG_INFO(Render_Vulkan, "RESDUMP|meta|f{}|e{}|{}|hash={:#x}|ud={}", frame, state.entries,
+                 name, stage.pgm_hash, UserDataString(stage));
+    }
+    const u32 entry = it->second;
 
     for (size_t index = 0; index < stage.buffers.size(); ++index) {
         const auto& desc = stage.buffers[index];
@@ -140,17 +191,19 @@ void DumpDrawResources(const Shader::Info& stage, Core::MemoryManager* memory) {
         if (size < sizeof(u32) || size % sizeof(u32) != 0) {
             continue;
         }
-        const u64 key = BufferKey(stage.sw_stage, stage.pgm_hash, address, size);
-        if (!state.seen.insert(key).second) {
-            continue;
-        }
-        if (state.content + size > MAX_FRAME_CONTENT) {
+        if (state.content.load(std::memory_order_relaxed) + size > MAX_TOTAL_CONTENT) {
             continue;
         }
 
         std::vector<u8> bytes(size);
         memory->CopySparseMemory(address, bytes.data(), size);
-        state.content += size;
+
+        // One copy per distinct block: materials are bound by many draws and by
+        // every captured frame, but the bytes only need to be in the log once.
+        if (!state.printed.insert(ContentHash(bytes.data(), size)).second) {
+            continue;
+        }
+        state.content.fetch_add(size, std::memory_order_relaxed);
         LogContent(frame, name, binding, stage.pgm_hash, bytes.data(), size);
     }
 }

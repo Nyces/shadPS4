@@ -294,15 +294,18 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(LogSettings, append, enable, filter, flush_le
 struct DebugSettings {
     Setting<bool> debug_dump{false};         // specific
     Setting<bool> shader_collect{false};     // specific
+    Setting<bool> resource_dump_auto{true};  // specific
     Setting<std::string> config_version{""}; // specific
 
     std::vector<OverrideItem> GetOverrideableFields() const {
         return std::vector<OverrideItem>{
             make_override<DebugSettings>("debug_dump", &DebugSettings::debug_dump),
-            make_override<DebugSettings>("shader_collect", &DebugSettings::shader_collect)};
+            make_override<DebugSettings>("shader_collect", &DebugSettings::shader_collect),
+            make_override<DebugSettings>("resource_dump_auto", &DebugSettings::resource_dump_auto)};
     }
 };
-NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DebugSettings, debug_dump, shader_collect, config_version)
+NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(DebugSettings, debug_dump, shader_collect, resource_dump_auto,
+                                   config_version)
 
 // -------------------------------
 // Input settings
@@ -693,6 +696,7 @@ public:
     // Debug settings
     SETTING_FORWARD_BOOL(m_debug, DebugDump, debug_dump)
     SETTING_FORWARD_BOOL(m_debug, ShaderCollect, shader_collect)
+    SETTING_FORWARD_BOOL(m_debug, ResourceDumpAuto, resource_dump_auto)
     SETTING_FORWARD(m_debug, ConfigVersion, config_version)
 
     // GPU Settings

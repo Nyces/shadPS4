@@ -608,6 +608,7 @@ bool EmulatorSettingsImpl::TransferSettings() {
 
         setFromToml(s.debug_dump, debug, "DebugDump");
         setFromToml(s.shader_collect, debug, "CollectShader");
+        setFromToml(s.resource_dump_auto, debug, "ResourceDumpAuto");
         setFromToml(m_general.show_fps_counter, debug, "showFpsCounter");
     }
 
