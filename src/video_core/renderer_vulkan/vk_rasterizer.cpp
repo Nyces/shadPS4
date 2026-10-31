@@ -862,6 +862,22 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
                      upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()));
         }
+        // Count how often each variant runs. Two variants of one layer can share a shader pair
+        // and differ only in layout, and a session cannot tell that apart from a camera mode
+        // switch unless the run counts are reported per variant: both incrementing at the same
+        // rate means both are drawn in the same frames.
+        static std::unordered_map<u64, u32> pass_runs;
+        const u32 runs = ++pass_runs[key ^ (layout_key * 0x9E3779B97F4A7C15ull)];
+        if (runs % 500 == 1) {
+            const auto& vp_run = liverpool->regs.viewports[0];
+            LOG_INFO(Render_Vulkan,
+                     "Pass runs: cb0={:#x}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
+                     "vp=({},{},{},{}), runs={}",
+                     liverpool->regs.color_buffers[0].Address(),
+                     static_cast<u32>(liverpool->regs.primitive_type),
+                     liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, vp_run.xoffset,
+                     vp_run.yoffset, vp_run.xscale, vp_run.yscale, runs);
+        }
     }
 
     const auto& vs_info = pipeline->GetStage(Shader::LogicalStage::Vertex);
@@ -1856,15 +1872,20 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             const auto which_it =
                 std::find(kGridAddrs.begin(), kGridAddrs.end(), u64(image.info.guest_address));
             if (which_it != kGridAddrs.end()) {
-                static u32 grid_hits[kGridAddrs.size()]{};
-                static u32 grid_logs[kGridAddrs.size()]{};
+                // Key on the resolved extent as well: the same address is bound as the enlarged
+                // render target and as an untouched smaller image over the same memory, and
+                // sampling whichever came first hid the target that actually holds the layer.
                 const u32 which = u32(which_it - kGridAddrs.begin());
-                ++grid_hits[which];
+                const u64 slot = (u64(which) << 32) | u64(image.info.size.width);
+                static std::unordered_map<u64, u32> grid_hits;
+                static std::unordered_map<u64, u32> grid_logs;
+                const u32 hits = ++grid_hits[slot];
+                const u32 logged = grid_logs[slot];
                 const bool enlarged = image.info.size.width >= 3840;
-                const bool sample_now = (enlarged && grid_logs[which] == 0) ||
-                                        (grid_hits[which] % 400 == 1 && grid_logs[which] < 6);
+                const bool sample_now =
+                    (enlarged && logged == 0) || (hits % 400 == 1 && logged < 4);
                 if (sample_now) {
-                    ++grid_logs[which];
+                    grid_logs[slot] = logged + 1;
                     constexpr u32 grid_cols = 32;
                     constexpr u32 grid_rows = 18;
                     constexpr u32 grid_cells = grid_cols * grid_rows;
@@ -1949,24 +1970,52 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         }
                         return '@';
                     };
-                    LOG_INFO(Render_Vulkan,
-                             "Layer map: addr={:#x} {}x{} bpp={} pitch={} bound={}x{} sample={}",
-                             image.info.guest_address, grid_w, grid_h, bpp, image.info.pitch,
-                             desc.info.size.width, desc.info.size.height, grid_logs[which]);
+                    std::array<float, grid_cells> lum{};
                     for (u32 gy = 0; gy < grid_rows; ++gy) {
-                        std::string line;
                         for (u32 gx = 0; gx < grid_cols; ++gx) {
                             const u8* src = data + (gy * grid_cols + gx) * texel;
-                            float lum = 0.0f;
+                            float v = 0.0f;
                             if (bpp == 8) {
                                 const u16 r = u16(src[0]) | (u16(src[1]) << 8);
                                 const u16 g = u16(src[2]) | (u16(src[3]) << 8);
                                 const u16 b = u16(src[4]) | (u16(src[5]) << 8);
-                                lum = (half(r) + half(g) + half(b)) / 3.0f;
+                                v = (half(r) + half(g) + half(b)) / 3.0f;
                             } else if (bpp == 4) {
-                                lum = (float(src[0]) + float(src[1]) + float(src[2])) / 765.0f;
+                                v = (float(src[0]) + float(src[1]) + float(src[2])) / 765.0f;
                             }
-                            line += shade(lum);
+                            lum[gy * grid_cols + gx] = v;
+                        }
+                    }
+                    LOG_INFO(Render_Vulkan,
+                             "Layer map: addr={:#x} {}x{} bpp={} pitch={} bound={}x{} sample={}",
+                             image.info.guest_address, grid_w, grid_h, bpp, image.info.pitch,
+                             desc.info.size.width, desc.info.size.height, logged + 1);
+                    // The exact boundary of a layer that stops short matters more than its
+                    // appearance, so report the per-column and per-row means as numbers too.
+                    std::string cols;
+                    for (u32 gx = 0; gx < grid_cols; ++gx) {
+                        float sum = 0.0f;
+                        for (u32 gy = 0; gy < grid_rows; ++gy) {
+                            sum += lum[gy * grid_cols + gx];
+                        }
+                        cols += fmt::format("{:.2f} ", sum / float(grid_rows));
+                    }
+                    LOG_INFO(Render_Vulkan, "Layer cols: addr={:#x} {}", image.info.guest_address,
+                             cols);
+                    std::string rows;
+                    for (u32 gy = 0; gy < grid_rows; ++gy) {
+                        float sum = 0.0f;
+                        for (u32 gx = 0; gx < grid_cols; ++gx) {
+                            sum += lum[gy * grid_cols + gx];
+                        }
+                        rows += fmt::format("{:.2f} ", sum / float(grid_cols));
+                    }
+                    LOG_INFO(Render_Vulkan, "Layer rows: addr={:#x} {}", image.info.guest_address,
+                             rows);
+                    for (u32 gy = 0; gy < grid_rows; ++gy) {
+                        std::string line;
+                        for (u32 gx = 0; gx < grid_cols; ++gx) {
+                            line += shade(lum[gy * grid_cols + gx]);
                         }
                         LOG_INFO(Render_Vulkan, "Layer map |{}|", line);
                     }
