@@ -1185,6 +1185,8 @@ set(VIDEO_CORE src/video_core/amdgpu/cb_db_extent.h
                src/video_core/page_manager.h
                src/video_core/renderdoc.cpp
                src/video_core/renderdoc.h
+               src/video_core/resource_dump.cpp
+               src/video_core/resource_dump.h
 )
 
 set(IMGUI src/imgui/imgui_config.h

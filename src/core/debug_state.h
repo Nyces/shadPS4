@@ -152,6 +152,8 @@ class DebugStateImpl {
     std::atomic<float> dispatch_count_avg = 0.0f;
 
     s32 gnm_frame_dump_request_count = -1;
+    /// Frames left to dump shader resource descriptors for; see RequestResourceDump.
+    std::atomic_int32_t resource_dump_frames{0};
     std::unordered_map<size_t, FrameDump*> waiting_reg_dumps;
     std::unordered_map<size_t, std::string> waiting_reg_dumps_dbg;
     bool waiting_submit_pause = false;
@@ -206,6 +208,12 @@ public:
         dispatch_count_avg.store(dispatches_avg + (float(dispatches) - dispatches_avg) * smoothing,
                                  std::memory_order_relaxed);
         ++flip_frame_count;
+
+        // The resource dump is counted in frames, so it is advanced here rather
+        // than in the draw loop.
+        if (const auto frames = resource_dump_frames.load(std::memory_order_relaxed); frames > 0) {
+            resource_dump_frames.store(frames - 1, std::memory_order_relaxed);
+        }
     }
 
     void IncDrawCall() noexcept {
@@ -247,6 +255,17 @@ public:
     }
 
     void RequestFrameDump(s32 count = 1);
+
+    /// Dumps the resource descriptors (and the guest memory they point at) of
+    /// every draw for the next *frames* frames. Used to read the constants a
+    /// RenderDoc capture cannot expose.
+    void RequestResourceDump(s32 frames = 1) {
+        resource_dump_frames.store(frames, std::memory_order_relaxed);
+    }
+
+    bool DumpingResources() const {
+        return resource_dump_frames.load(std::memory_order_relaxed) > 0;
+    }
 
     FrameDump& GetFrameDump() {
         return frame_dump_list[frame_dump_list.size() - gnm_frame_dump_request_count];

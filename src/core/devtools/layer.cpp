@@ -413,6 +413,15 @@ void L::Draw() {
         }
     }
 
+    // Ctrl+Alt+F8 dumps the resource descriptors of the next frame. The request
+    // is for two frame flips so the frame after the keypress is always complete.
+    if (IsKeyPressed(ImGuiKey_F8, false)) {
+        if (io.KeyCtrl && io.KeyAlt) {
+            DebugState.RequestResourceDump(2);
+            DebugState.ShowDebugMessage("Resource dump: next frame");
+        }
+    }
+
     if (DebugState.IsGuestThreadsPaused()) {
         ImVec2 pos = ImVec2(10, 10);
         ImU32 color = IM_COL32(255, 255, 255, 255);
