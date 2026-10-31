@@ -164,6 +164,33 @@ void DumpVertexInput(u32 location, u64 address, u64 stride, u64 records, u32 dat
              frame, location, address, stride, records, data_format, num_format, vk_format);
 }
 
+void LogVaryingDump(u32 frame, u64 vs_hash, const u8* data) {
+    constexpr u32 slots = Shader::VARYING_DUMP_SLOTS;
+    constexpr u32 components = slots * 4;
+    for (u32 vertex = 0; vertex < Shader::VARYING_DUMP_VERTICES; ++vertex) {
+        const u8* record = data + vertex * components * sizeof(float);
+        std::string text;
+        bool empty = true;
+        for (u32 index = 0; index < components; ++index) {
+            float value;
+            std::memcpy(&value, record + index * sizeof(float), sizeof(float));
+            if (value != 0.0f) {
+                empty = false;
+            }
+            if (!text.empty()) {
+                text += ',';
+            }
+            text += fmt::format("{:.5g}", value);
+        }
+        if (empty) {
+            // Nothing was exported for this vertex index (the draw is shorter
+            // than the window), which is different from exporting zeros.
+            continue;
+        }
+        LOG_INFO(Render_Vulkan, "RESDUMP|vary|f{}|vs={:#x}|v{}|{}", frame, vs_hash, vertex, text);
+    }
+}
+
 void DumpDrawResources(std::span<const Shader::Info* const> stages, Core::MemoryManager* memory) {
     if (!ShouldDumpDrawResources()) {
         return;

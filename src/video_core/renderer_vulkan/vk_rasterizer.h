@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <optional>
+#include <vector>
+
 #include "common/recursive_lock.h"
 #include "common/shared_first_mutex.h"
 #include "video_core/buffer_cache/buffer_cache.h"
@@ -123,6 +126,13 @@ private:
     void BindTextures(const Shader::Info& stage, Shader::Backend::Bindings& binding);
     bool BindResources(const Pipeline* pipeline);
 
+    /// Returns the descriptor the vertex stage writes its output attributes
+    /// into, reserving a fresh record window for every captured draw.
+    vk::DescriptorBufferInfo AcquireVaryingDump(const Shader::Info& stage);
+
+    /// Reads the captured vertex outputs back and writes them to the log.
+    void FlushVaryingDump();
+
     void BindVertexBuffers(const GraphicsPipeline* pipeline);
     void BindIndexBuffer(u32 index_offset = 0);
 
@@ -148,6 +158,19 @@ private:
     PipelineCache pipeline_cache;
     const bool host_markers_enabled;
     const bool guest_markers_enabled;
+
+    /// One captured draw: where its vertex outputs landed and which vertex
+    /// shader produced them.
+    struct VaryingDumpRecord {
+        u64 offset{};
+        u64 hash{};
+    };
+    std::optional<VideoCore::Buffer> varying_dump;
+    std::vector<VaryingDumpRecord> varying_dump_records;
+    u32 varying_dump_frame{};
+
+    /// Captured draws per frame; the rest share one scratch window.
+    static constexpr u32 MAX_VARYING_CAPTURES = 32;
 
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;

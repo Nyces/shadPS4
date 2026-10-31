@@ -81,7 +81,17 @@ enum class BufferType : u8 {
     GdsBuffer,
     SharedMemory,
     ClipPlanes,
+    VaryingDump,
 };
+
+/// Shape of the debug vertex-output dump: one vec4 per output slot, per vertex.
+/// Each vertex owns VARYING_DUMP_SLOTS vec4s (seven parameter slots plus the
+/// clip-space position) and the slot index is the vertex index modulo
+/// VARYING_DUMP_VERTICES, so a draw past the limit overwrites earlier records
+/// instead of running off the end of the buffer.
+inline constexpr u32 VARYING_DUMP_VERTICES = 32;
+inline constexpr u32 VARYING_DUMP_SLOTS = 8;
+inline constexpr u32 VARYING_DUMP_BYTES = VARYING_DUMP_VERTICES * VARYING_DUMP_SLOTS * 16;
 
 struct BufferResource {
     SharpFetch<AmdGpu::Buffer> sharp_fetch{};

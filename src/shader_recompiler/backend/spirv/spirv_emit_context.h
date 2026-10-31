@@ -190,6 +190,14 @@ public:
         return OpLoad(U32[1], ptr);
     }
 
+    /// Copies one component of one vertex-stage output into the debug buffer.
+    ///
+    /// Varyings only exist inside the rasteriser, so a capture can never show
+    /// what the vertex shader handed to the interpolator. Emitting one store per
+    /// output component makes that data readable from guest-visible memory.
+    /// ``bits`` must already be the u32 reinterpretation of the component.
+    void EmitVaryingDump(u32 slot, u32 element, Id bits);
+
     Info& info;
     const RuntimeInfo& runtime_info;
     const Profile& profile;
@@ -359,6 +367,9 @@ public:
     size_t flatbuf_index{};
     size_t bda_pagetable_index{};
     size_t fault_buffer_index{};
+    /// Index of the debug vertex-output buffer in ``buffers``, or ``npos`` when
+    /// this stage has none.
+    size_t varying_dump_index{static_cast<size_t>(-1)};
     Id physical_pointer_type_u32;
 
     Id sampler_type{};

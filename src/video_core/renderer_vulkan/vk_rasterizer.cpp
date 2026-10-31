@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
+
 #include "common/debug.h"
 #include "core/debug_state.h"
 #include "core/emulator_settings.h"
@@ -390,6 +392,48 @@ void Rasterizer::Finish() {
     scheduler.Finish();
 }
 
+vk::DescriptorBufferInfo Rasterizer::AcquireVaryingDump(const Shader::Info& stage) {
+    constexpr u64 total = static_cast<u64>(MAX_VARYING_CAPTURES + 1) * Shader::VARYING_DUMP_BYTES;
+    if (!varying_dump) {
+        varying_dump.emplace(instance, 0, total, VideoCore::MemoryType::HostCached, "varying dump");
+        if (!varying_dump->mapped_data.empty()) {
+            std::memset(varying_dump->mapped_data.data(), 0, total);
+        }
+    }
+    // Every draw gets a valid descriptor; the ones inside a capture window get a
+    // private record to read back, and everything else shares the last window so
+    // it can never overwrite a record that is about to be logged.
+    u64 offset = static_cast<u64>(MAX_VARYING_CAPTURES) * Shader::VARYING_DUMP_BYTES;
+    if (VideoCore::ShouldDumpDrawResources() &&
+        varying_dump_records.size() < MAX_VARYING_CAPTURES) {
+        offset = static_cast<u64>(varying_dump_records.size()) * Shader::VARYING_DUMP_BYTES;
+        varying_dump_records.push_back({offset, stage.pgm_hash});
+    }
+    return vk::DescriptorBufferInfo{
+        .buffer = varying_dump->Handle(),
+        .offset = offset,
+        .range = Shader::VARYING_DUMP_BYTES,
+    };
+}
+
+void Rasterizer::FlushVaryingDump() {
+    if (!varying_dump || varying_dump->mapped_data.empty()) {
+        varying_dump_records.clear();
+        return;
+    }
+    constexpr u64 total = static_cast<u64>(MAX_VARYING_CAPTURES + 1) * Shader::VARYING_DUMP_BYTES;
+    varying_dump->Invalidate(0, total);
+    const u8* base = varying_dump->mapped_data.data();
+    for (const auto& record : varying_dump_records) {
+        VideoCore::LogVaryingDump(varying_dump_frame, record.hash, base + record.offset);
+    }
+    varying_dump_records.clear();
+    // Zeroing here is safe because the GPU has just been waited on, and it also
+    // keeps a draw that exports fewer attributes from reading stale records.
+    std::memset(varying_dump->mapped_data.data(), 0, total);
+    varying_dump->Flush(0, total);
+}
+
 void Rasterizer::OnSubmit() {
     buffer_cache.TickFrame();
     texture_cache.ProcessDownloadImages();
@@ -405,6 +449,18 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     if (IsComputeImageCopy(pipeline) || IsComputeMetaClear(pipeline) ||
         IsComputeImageClear(pipeline)) {
         return false;
+    }
+
+    // The vertex-output dump of the previous frame is only complete once the GPU
+    // has caught up, so the wait happens here, at the first draw of a new frame,
+    // instead of on every draw.
+    const u32 frame = DebugState.GetFrameNum();
+    if (varying_dump_frame != frame) {
+        if (!varying_dump_records.empty()) {
+            scheduler.Finish();
+            FlushVaryingDump();
+        }
+        varying_dump_frame = frame;
     }
 
     set_write_index = 0;
@@ -755,6 +811,8 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
                 const u64 offset =
                     vk_buffer.Copy(stage.flattened_ud_buf.data(), ubo_size, alignment);
                 buffer_infos.emplace_back(vk_buffer.Handle(), offset, ubo_size);
+            } else if (desc.buffer_type == Shader::BufferType::VaryingDump) {
+                buffer_infos.emplace_back(AcquireVaryingDump(stage));
             } else if (desc.buffer_type == Shader::BufferType::ClipPlanes) {
                 // Permutations compiled without enabled planes never read the buffer, so the
                 // declared binding is satisfied with a null descriptor instead of a copy.

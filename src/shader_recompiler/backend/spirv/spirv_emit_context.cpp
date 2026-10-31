@@ -836,6 +836,9 @@ EmitContext::BufferSpv EmitContext::DefineBuffer(bool is_written, bool is_cohere
     case BufferType::SharedMemory:
         Name(id, "ssbo_shmem");
         break;
+    case BufferType::VaryingDump:
+        Name(id, "varying_dump");
+        break;
     default:
         Name(id, fmt::format("ssbo_{}", binding.buffer));
         break;
@@ -859,6 +862,8 @@ void EmitContext::DefineBuffers() {
             bda_pagetable_index = buffers.size();
         } else if (desc.buffer_type == BufferType::FaultBuffer) {
             fault_buffer_index = buffers.size();
+        } else if (desc.buffer_type == BufferType::VaryingDump) {
+            varying_dump_index = buffers.size();
         }
 
         // Define aliases depending on the shader usage.
@@ -885,6 +890,26 @@ void EmitContext::DefineBuffers() {
         }
         ++binding.unified;
     }
+}
+
+void EmitContext::EmitVaryingDump(u32 slot, u32 element, Id value) {
+    if (varying_dump_index >= buffers.size()) {
+        return;
+    }
+    const auto& dump_buffer{buffers[varying_dump_index]};
+    if (dump_buffer.buffer_type != BufferType::VaryingDump) {
+        return;
+    }
+    const auto [dump_id, dump_pointer_type] = dump_buffer.aliases[u32(PointerType::U32)];
+    // The record index is the vertex index modulo the vertex count, so a draw
+    // larger than the window overwrites earlier records instead of writing past
+    // the end of the buffer.
+    const Id vertex{OpLoad(U32[1], vertex_index)};
+    const Id record{OpBitwiseAnd(U32[1], vertex, ConstU32(VARYING_DUMP_VERTICES - 1))};
+    const Id base{OpIMul(U32[1], record, ConstU32(VARYING_DUMP_SLOTS * 4))};
+    const Id index{OpIAdd(U32[1], base, ConstU32(slot * 4 + element))};
+    const Id pointer{OpAccessChain(dump_pointer_type, dump_id, u32_zero_value, index)};
+    OpStore(pointer, value);
 }
 
 spv::ImageFormat GetFormat(const AmdGpu::Image& image) {

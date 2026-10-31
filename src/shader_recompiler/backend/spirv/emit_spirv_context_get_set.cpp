@@ -254,6 +254,16 @@ Id EmitGetAttributeU32(EmitContext& ctx, IR::Attribute attr, u32 comp) {
     }
 }
 
+/// Reinterprets an attribute component as the u32 bit pattern the debug dump
+/// stores, which only needs a bitcast when the component is not already u32.
+static Id AsU32Bits(EmitContext& ctx, IR::Attribute attr, Id value) {
+    const auto [component_type, is_integer] = OutputAttrComponentType(ctx, attr);
+    if (is_integer && component_type.value == ctx.U32[1].value) {
+        return value;
+    }
+    return ctx.OpBitcast(ctx.U32[1], value);
+}
+
 void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 element) {
     const auto op_store = [&](Id pointer) {
         const auto [component_type, is_integer] = OutputAttrComponentType(ctx, attr);
@@ -265,6 +275,11 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     };
     if (IR::IsParam(attr)) {
         const u32 attr_index{u32(attr) - u32(IR::Attribute::Param0)};
+        if (ctx.hw_stage == HwStage::Vertex) {
+            // Mirror every exported varying into the debug buffer: this is the
+            // only point where the vertex stage's outputs are visible at all.
+            ctx.EmitVaryingDump(attr_index, element, AsU32Bits(ctx, attr, value));
+        }
         if (ctx.hw_stage == HwStage::Local) {
             const auto component_ptr = ctx.TypePointer(spv::StorageClass::Output, ctx.F32[1]);
             return op_store(ctx.OpAccessChain(component_ptr, ctx.output_attr_array,
@@ -295,6 +310,10 @@ void EmitSetAttribute(EmitContext& ctx, IR::Attribute attr, Id value, u32 elemen
     }
     switch (attr) {
     case IR::Attribute::Position0:
+        if (ctx.hw_stage == HwStage::Vertex) {
+            // The last slot holds the clip-space position the stage exported.
+            ctx.EmitVaryingDump(VARYING_DUMP_SLOTS - 1, element, AsU32Bits(ctx, attr, value));
+        }
         return op_store(
             ctx.OpAccessChain(ctx.output_f32, ctx.output_position, ctx.ConstU32(element)));
     case IR::Attribute::ClipDistance:

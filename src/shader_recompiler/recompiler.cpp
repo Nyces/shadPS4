@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "common/logging/classes.h"
+#include "core/emulator_settings.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/frontend/structured_control_flow.h"
@@ -141,6 +142,20 @@ IR::Program TranslateProgram(const std::span<const u32>& code, Pools& pools, Inf
     Shader::Optimization::ConstantPropagationPass(program.post_order_blocks);
     Shader::Optimization::DeadCodeEliminationPass(program);
     Shader::Optimization::CollectShaderInfoPass(program, profile);
+
+    // Appended after the info pass so it never renumbers a guest binding. The
+    // vertex stage gets one extra writable buffer that the emitter fills with
+    // its own output attributes; without it the varyings only exist inside the
+    // rasteriser and a capture cannot show what the vertex shader produced.
+    if (info.hw_stage == HwStage::Vertex && EmulatorSettings.IsResourceDumpAuto() &&
+        info.buffers.size() < info.buffers.capacity()) {
+        info.buffers.push_back(BufferResource{
+            .used_types = IR::Type::U32,
+            .buffer_type = BufferType::VaryingDump,
+            .is_written = true,
+        });
+    }
+
     Shader::IR::DumpProgram(program, info);
 
     return program;

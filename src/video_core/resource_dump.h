@@ -69,4 +69,15 @@ void DumpDrawResources(std::span<const Shader::Info* const> stages, Core::Memory
 void DumpVertexInput(u32 location, u64 address, u64 stride, u64 records, u32 data_format,
                      u32 num_format, u32 vk_format);
 
+/**
+ * Writes one captured draw's vertex-stage outputs to the log.
+ *
+ * The vertex shader's seven exported attributes plus its clip-space position are
+ * mirrored into a debug buffer per vertex, so *data* is
+ * ``VARYING_DUMP_VERTICES * VARYING_DUMP_SLOTS`` vec4s: slot 0..6 are the
+ * parameter attributes the pixel stage interpolates and slot 7 is the exported
+ * position. One line per vertex, ``RESDUMP|vary|``.
+ */
+void LogVaryingDump(u32 frame, u64 vs_hash, const u8* data);
+
 } // namespace VideoCore
