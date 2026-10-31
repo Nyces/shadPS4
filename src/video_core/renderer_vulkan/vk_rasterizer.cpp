@@ -1867,8 +1867,9 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             // as a filled block with an empty remainder, which a coarse brightness summary hides.
             // One texel per cell is enough, and it keeps the readback smaller than the guest
             // allocation even when the host image was enlarged past it.
-            static constexpr std::array<u64, 5> kGridAddrs = {
-                0x20f0c0000ull, 0x209340000ull, 0x207140000ull, 0x208240000ull, 0x200040000ull};
+            static constexpr std::array<u64, 6> kGridAddrs = {0x20f0c0000ull, 0x209340000ull,
+                                                              0x207140000ull, 0x208240000ull,
+                                                              0x200040000ull, 0x202040000ull};
             const auto which_it =
                 std::find(kGridAddrs.begin(), kGridAddrs.end(), u64(image.info.guest_address));
             if (which_it != kGridAddrs.end()) {
@@ -2012,17 +2013,17 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     }
                     LOG_INFO(Render_Vulkan, "Layer rows: addr={:#x} {}", image.info.guest_address,
                              rows);
+                    // Emit the whole map as a single message. The logger drops messages beyond
+                    // a per-second budget, so one message per row lost all but the first and
+                    // left the maps unreadable.
+                    std::string art;
                     for (u32 gy = 0; gy < grid_rows; ++gy) {
-                        std::string line;
+                        art += '\n';
                         for (u32 gx = 0; gx < grid_cols; ++gx) {
-                            line += shade(lum[gy * grid_cols + gx]);
+                            art += shade(lum[gy * grid_cols + gx]);
                         }
-                        // Every row carries its own index: the logger drops consecutive
-                        // identical messages, and the blank rows of a half-filled target are
-                        // exactly that, which silently truncated the map.
-                        LOG_INFO(Render_Vulkan, "Layer map {}:{} s{} |{}|", which, logged + 1, gy,
-                                 line);
                     }
+                    LOG_INFO(Render_Vulkan, "Layer art w{} s{}:{}", which, logged + 1, art);
                 }
             }
 
