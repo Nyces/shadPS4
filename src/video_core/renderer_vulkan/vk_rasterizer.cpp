@@ -813,10 +813,18 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         };
         const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
         const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
-        static std::unordered_set<u64> logged_shaders;
+        // Two draws can share a shader pair and still be laid out differently, and one of them
+        // then covers its target while the other stops at the game's window. Keep the viewport
+        // and the scissor in the key so both are reported instead of only whichever came first.
+        static std::unordered_map<u64, std::unordered_set<u64>> logged_shaders;
+        const auto& vp_key_regs = liverpool->regs.viewports[0];
         const u64 key = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
                         (vs_hash << 20) ^ fs_hash;
-        if (logged_shaders.insert(key).second) {
+        const u64 layout_key =
+            (u64(std::bit_cast<u32>(vp_key_regs.xscale)) << 40) ^
+            (u64(std::bit_cast<u32>(vp_key_regs.yscale)) << 8) ^
+            u64(AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x));
+        if (logged_shaders[key].insert(layout_key).second) {
             // Count the shader's image inputs and how many of them the game actually
             // bound this frame, so a layer that loses its source under upscaling shows
             // as a bound count that dropped without the program changing.
@@ -1838,13 +1846,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             auto& image = texture_cache.GetImage(image_id);
             auto& image_view = texture_cache.FindTexture(image_id, desc);
 
-            // TEMPORARY DIAGNOSTIC: read the light target and the output surface back and report an
-            // 8x8 brightness grid, so the region their content covers can be seen without a
-            // capture. A small staging buffer holds one texel from the centre of each of the
-            // sixty-four cells, which keeps the readback smaller than the guest allocation even
-            // when the host image was enlarged past it.
+            // TEMPORARY DIAGNOSTIC: map the scene targets so the region each one actually covers
+            // can be read straight out of the log. A layer that stops at the game's window shows
+            // as a filled block with an empty remainder, which a coarse brightness summary hides.
+            // One texel per cell is enough, and it keeps the readback smaller than the guest
+            // allocation even when the host image was enlarged past it.
             static constexpr std::array<u64, 5> kGridAddrs = {
-                0x20f0c0000ull, 0x208240000ull, 0x200040000ull, 0x207140000ull, 0x20acc0000ull};
+                0x20f0c0000ull, 0x209340000ull, 0x207140000ull, 0x208240000ull, 0x200040000ull};
             const auto which_it =
                 std::find(kGridAddrs.begin(), kGridAddrs.end(), u64(image.info.guest_address));
             if (which_it != kGridAddrs.end()) {
@@ -1853,12 +1861,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 const u32 which = u32(which_it - kGridAddrs.begin());
                 ++grid_hits[which];
                 const bool enlarged = image.info.size.width >= 3840;
-                const bool sample_now = (enlarged && grid_logs[which] < 8) ||
-                                        (grid_hits[which] % 100 == 1 && grid_logs[which] < 200);
+                const bool sample_now = (enlarged && grid_logs[which] == 0) ||
+                                        (grid_hits[which] % 400 == 1 && grid_logs[which] < 6);
                 if (sample_now) {
                     ++grid_logs[which];
-                    constexpr u32 grid_n = 8;
-                    constexpr u32 grid_cells = grid_n * grid_n;
+                    constexpr u32 grid_cols = 32;
+                    constexpr u32 grid_rows = 18;
+                    constexpr u32 grid_cells = grid_cols * grid_rows;
                     const u32 grid_w = image.info.size.width;
                     const u32 grid_h = image.info.size.height;
                     const u32 bpp = image.info.num_bits / 8;
@@ -1871,14 +1880,14 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                     const auto cmdbuf = scheduler.CommandBuffer();
                     image.Transit(vk::ImageLayout::eTransferSrcOptimal,
                                   vk::AccessFlagBits2::eTransferRead, {});
-                    for (u32 gy = 0; gy < grid_n; ++gy) {
-                        for (u32 gx = 0; gx < grid_n; ++gx) {
+                    for (u32 gy = 0; gy < grid_rows; ++gy) {
+                        for (u32 gx = 0; gx < grid_cols; ++gx) {
                             const u32 px =
-                                std::min(grid_w - 1, (gx * 2 + 1) * grid_w / (grid_n * 2));
+                                std::min(grid_w - 1, (gx * 2 + 1) * grid_w / (grid_cols * 2));
                             const u32 py =
-                                std::min(grid_h - 1, (gy * 2 + 1) * grid_h / (grid_n * 2));
+                                std::min(grid_h - 1, (gy * 2 + 1) * grid_h / (grid_rows * 2));
                             const vk::BufferImageCopy copy = {
-                                .bufferOffset = base_offset + u64(gy * grid_n + gx) * texel,
+                                .bufferOffset = base_offset + u64(gy * grid_cols + gx) * texel,
                                 .bufferRowLength = 0,
                                 .bufferImageHeight = 0,
                                 .imageSubresource =
@@ -1919,24 +1928,48 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                         }
                         return std::bit_cast<float>(bits);
                     };
-                    std::string grid;
-                    for (u32 i = 0; i < grid_cells; ++i) {
-                        const u8* src = data + i * texel;
-                        float lum = 0.0f;
-                        if (bpp == 8) {
-                            const u16 r = u16(src[0]) | (u16(src[1]) << 8);
-                            const u16 g = u16(src[2]) | (u16(src[3]) << 8);
-                            const u16 b = u16(src[4]) | (u16(src[5]) << 8);
-                            lum = (half(r) + half(g) + half(b)) / 3.0f;
-                        } else if (bpp == 4) {
-                            lum = (float(src[0]) + float(src[1]) + float(src[2])) / 765.0f;
+                    const auto shade = [](float l) -> char {
+                        if (l < 0.02f) {
+                            return ' ';
                         }
-                        grid += fmt::format("{:.3f} ", lum);
-                    }
+                        if (l < 0.06f) {
+                            return '.';
+                        }
+                        if (l < 0.12f) {
+                            return ':';
+                        }
+                        if (l < 0.25f) {
+                            return '+';
+                        }
+                        if (l < 0.45f) {
+                            return '*';
+                        }
+                        if (l < 0.70f) {
+                            return '#';
+                        }
+                        return '@';
+                    };
                     LOG_INFO(Render_Vulkan,
-                             "Layer grid: addr={:#x} {}x{} g{} bpp={} pitch={} bound={}x{} {}",
-                             image.info.guest_address, grid_w, grid_h, grid_n, bpp,
-                             image.info.pitch, desc.info.size.width, desc.info.size.height, grid);
+                             "Layer map: addr={:#x} {}x{} bpp={} pitch={} bound={}x{} sample={}",
+                             image.info.guest_address, grid_w, grid_h, bpp, image.info.pitch,
+                             desc.info.size.width, desc.info.size.height, grid_logs[which]);
+                    for (u32 gy = 0; gy < grid_rows; ++gy) {
+                        std::string line;
+                        for (u32 gx = 0; gx < grid_cols; ++gx) {
+                            const u8* src = data + (gy * grid_cols + gx) * texel;
+                            float lum = 0.0f;
+                            if (bpp == 8) {
+                                const u16 r = u16(src[0]) | (u16(src[1]) << 8);
+                                const u16 g = u16(src[2]) | (u16(src[3]) << 8);
+                                const u16 b = u16(src[4]) | (u16(src[5]) << 8);
+                                lum = (half(r) + half(g) + half(b)) / 3.0f;
+                            } else if (bpp == 4) {
+                                lum = (float(src[0]) + float(src[1]) + float(src[2])) / 765.0f;
+                            }
+                            line += shade(lum);
+                        }
+                        LOG_INFO(Render_Vulkan, "Layer map |{}|", line);
+                    }
                 }
             }
 
