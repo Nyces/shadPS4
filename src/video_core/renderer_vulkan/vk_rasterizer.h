@@ -97,8 +97,11 @@ private:
     // glass plane is laid out in the game's original window pixels, so every one of its window
     // coordinates has to be multiplied by the presentation scale. Its own size follows the
     // camera and is thus not the thing that is wrong: only the conversion to clip space is,
-    // and it is half of what the enlarged target needs.
+    // and it is half of what the enlarged target needs. Every draw is sorted into one of eight
+    // buckets by its vertex program, and each bucket receives a different factor, so a single
+    // screenshot tells which bucket holds the plane.
     mutable float probe_viewport_scale{1.0f};
+    void UpdateProbeScale(const GraphicsPipeline* pipeline, bool indirect);
     void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
     float PresentationScale() const;
     void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,
