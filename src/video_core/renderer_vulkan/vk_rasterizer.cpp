@@ -765,21 +765,22 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    // TEMPORARY EXPERIMENT: skip the untextured quad drawn into the output surface with the full
-    // viewport. It reads no texture, so it can only paint a flat shape, and it is the only pass
-    // into the presented surface that could leave the rectangle with no light there while the
-    // composition it is composited over is uniform.
+    // TEMPORARY EXPERIMENT: drop every overlay drawn into a presented surface, keeping only the
+    // full-screen copy of the composition. The composition reads back uniform, so if the
+    // rectangle with no light is still there with nothing but that copy on screen it has to come
+    // from the copy itself; if it goes, it is one of the overlays.
     {
+        const u64 cb_addr = regs.color_buffers[0].Address();
         const auto stages = pipeline->GetStages();
         const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
             const u32 index = u32(s);
             return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
         };
-        if (stage_hash(Shader::LogicalStage::Vertex) == 0x2f1086f4ull &&
-            stage_hash(Shader::LogicalStage::Fragment) == 0xd4e4f9d0ull) {
+        if ((cb_addr == 0x200040000ull || cb_addr == 0x202040000ull) &&
+            stage_hash(Shader::LogicalStage::Vertex) != 0x83b353faull) {
             static std::unordered_set<u64> logged_skip;
-            if (logged_skip.insert(regs.color_buffers[0].Address()).second) {
-                LOG_INFO(Render_Vulkan, "Skip quad: cb0={:#x}", regs.color_buffers[0].Address());
+            if (logged_skip.insert(cb_addr).second) {
+                LOG_INFO(Render_Vulkan, "Skip overlay: cb0={:#x}", cb_addr);
             }
             return;
         }
