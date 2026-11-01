@@ -93,6 +93,12 @@ public:
 
 private:
     void LogTargetMap(VideoCore::Image& image, u32 which, u32 sample);
+    // Scale the current draw's clip space about the top-left corner of the frame. The stage
+    // glass plane is laid out in the game's original window pixels, so every one of its window
+    // coordinates has to be multiplied by the presentation scale. Its own size follows the
+    // camera and is thus not the thing that is wrong: only the conversion to clip space is,
+    // and it is half of what the enlarged target needs.
+    mutable float probe_viewport_scale{1.0f};
     void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
     float PresentationScale() const;
     void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,

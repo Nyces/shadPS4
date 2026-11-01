@@ -765,33 +765,43 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    // TEMPORARY EXPERIMENT: the rectangle that keeps the light off reads like a single plane drawn
-    // at the game's own window size: a flat fill with a dark border on its right and bottom edges,
-    // stopping at the old frame extents. A plane that covers most of the frame is one quad, so
-    // drop every draw with at most six indices whose viewport is close to the full height and see
-    // which of them the rectangle goes with.
-    {
-        const auto& vp = regs.viewports[0];
-        if (regs.num_indices <= 6 && std::abs(vp.yscale) >= 400.0f) {
-            const auto stages = pipeline->GetStages();
-            const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
-                const u32 index = u32(s);
-                return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
-            };
-            const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
-            const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
-            static std::unordered_set<u64> logged_skip;
+    // TEMPORARY EXPERIMENT: the glass plane of the live stage is laid out in the game's original
+    // window pixels. In the native capture it covers exactly x=0..1920 and y=0..1080 of the
+    // 3840x2160 frame, i.e. the corner quadrant the game's own window sizes, and in another
+    // capture it covers 61% of the width while its height barely moved: its size follows the
+    // camera, so the size is not what is wrong, the conversion to clip space is, and it is half
+    // of what the enlarged target needs. Multiply the window coordinates of the candidate draws
+    // about the top-left corner instead of dropping them, and give every candidate a different
+    // factor so the screenshot says which of them the plane belongs to.
+    probe_viewport_scale = 1.0f;
+    if (regs.num_indices <= 6) {
+        const auto stages = pipeline->GetStages();
+        const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
+            const u32 index = u32(s);
+            return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
+        };
+        const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
+        const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
+        if (vs_hash == 0x64cd676aull) {
+            probe_viewport_scale = 2.0f;
+        } else if (vs_hash == 0x2d1f9f75ull) {
+            probe_viewport_scale = 2.5f;
+        } else if (vs_hash == 0x5f49d3d1ull) {
+            probe_viewport_scale = 3.0f;
+        }
+        if (probe_viewport_scale > 1.0f) {
+            static std::unordered_set<u64> logged_probe;
             const u64 key =
                 (u64(regs.color_buffers[0].Address()) << 24) ^ (vs_hash << 4) ^ (fs_hash & 0xFull);
-            if (logged_skip.insert(key).second) {
+            if (logged_probe.insert(key).second) {
                 LOG_INFO(Render_Vulkan,
-                         "Skip quad: cb0={:#x} vs={:#x} fs={:#x} prim={} numIndices={} "
+                         "Probe: cb0={:#x} vs={:#x} fs={:#x} scale={} prim={} numIndices={} "
                          "vp=({},{},{},{})",
-                         regs.color_buffers[0].Address(), vs_hash, fs_hash,
-                         static_cast<u32>(regs.primitive_type), regs.num_indices, vp.xoffset,
-                         vp.xscale, vp.yoffset, vp.yscale);
+                         regs.color_buffers[0].Address(), vs_hash, fs_hash, probe_viewport_scale,
+                         static_cast<u32>(regs.primitive_type), regs.num_indices,
+                         regs.viewports[0].xoffset, regs.viewports[0].xscale,
+                         regs.viewports[0].yoffset, regs.viewports[0].yscale);
             }
-            return;
         }
     }
 
@@ -1282,6 +1292,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!pipeline) {
         return;
     }
+
+    // Indirect batches carry their own counts, so they never take the probe.
+    probe_viewport_scale = 1.0f;
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
@@ -2815,6 +2828,19 @@ void Rasterizer::UpdateViewportScissorState() const {
                              converted_x, converted_y);
                 }
             }
+        }
+
+        // TEMPORARY EXPERIMENT: multiplying the offset and the extent of a clip-enabled pass by
+        // the same factor multiplies its window coordinates by that factor, so it enlarges the
+        // geometry about the top-left corner of the frame. That is exactly the conversion the
+        // glass plane needs: its own vertices describe the game's original window, and every
+        // one of them has to reach twice as far on the enlarged target while its origin stays
+        // at the corner.
+        if (probe_viewport_scale > 1.0f) {
+            viewport.x *= probe_viewport_scale;
+            viewport.width *= probe_viewport_scale;
+            viewport.y *= probe_viewport_scale;
+            viewport.height *= probe_viewport_scale;
         }
 
         viewports.push_back(viewport);
