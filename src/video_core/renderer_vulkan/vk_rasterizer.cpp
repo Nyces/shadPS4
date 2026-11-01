@@ -765,22 +765,31 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
-    // TEMPORARY EXPERIMENT: drop every overlay drawn into a presented surface, keeping only the
-    // full-screen copy of the composition. The composition reads back uniform, so if the
-    // rectangle with no light is still there with nothing but that copy on screen it has to come
-    // from the copy itself; if it goes, it is one of the overlays.
+    // TEMPORARY EXPERIMENT: the rectangle that keeps the light off reads like a single plane drawn
+    // at the game's own window size: a flat fill with a dark border on its right and bottom edges,
+    // stopping at the old frame extents. A plane that covers most of the frame is one quad, so
+    // drop every draw with at most six indices whose viewport is close to the full height and see
+    // which of them the rectangle goes with.
     {
-        const u64 cb_addr = regs.color_buffers[0].Address();
-        const auto stages = pipeline->GetStages();
-        const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
-            const u32 index = u32(s);
-            return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
-        };
-        if ((cb_addr == 0x200040000ull || cb_addr == 0x202040000ull) &&
-            stage_hash(Shader::LogicalStage::Vertex) != 0x83b353faull) {
+        const auto& vp = regs.viewports[0];
+        if (regs.num_indices <= 6 && std::abs(vp.yscale) >= 400.0f) {
+            const auto stages = pipeline->GetStages();
+            const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
+                const u32 index = u32(s);
+                return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
+            };
+            const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
+            const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
             static std::unordered_set<u64> logged_skip;
-            if (logged_skip.insert(cb_addr).second) {
-                LOG_INFO(Render_Vulkan, "Skip overlay: cb0={:#x}", cb_addr);
+            const u64 key =
+                (u64(regs.color_buffers[0].Address()) << 24) ^ (vs_hash << 4) ^ (fs_hash & 0xFull);
+            if (logged_skip.insert(key).second) {
+                LOG_INFO(Render_Vulkan,
+                         "Skip quad: cb0={:#x} vs={:#x} fs={:#x} prim={} numIndices={} "
+                         "vp=({},{},{},{})",
+                         regs.color_buffers[0].Address(), vs_hash, fs_hash,
+                         static_cast<u32>(regs.primitive_type), regs.num_indices, vp.xoffset,
+                         vp.xscale, vp.yoffset, vp.yscale);
             }
             return;
         }
