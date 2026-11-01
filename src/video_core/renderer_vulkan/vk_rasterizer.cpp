@@ -1867,8 +1867,8 @@ void Rasterizer::DumpSceneTargets() {
     }
     // Read the scene targets once the frame is complete. Sampling them when they are bound as
     // textures runs before they are rendered, so it can only see nothing or the previous frame.
-    static constexpr std::array<u64, 4> kAddrs = {0x20f0c0000ull, 0x209340000ull, 0x207140000ull,
-                                                  0x208240000ull};
+    static constexpr std::array<u64, 6> kAddrs = {0x20f0c0000ull, 0x209340000ull, 0x207140000ull,
+                                                  0x208240000ull, 0x200040000ull, 0x202040000ull};
     for (u32 i = 0; i < kAddrs.size(); ++i) {
         const auto id = texture_cache.FindImageFromRange(kAddrs[i], 0x1000, false);
         if (!id) {
