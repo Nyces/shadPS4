@@ -3,6 +3,10 @@
 
 #include <xxhash.h>
 
+#include <mutex>
+#include <string>
+#include <unordered_set>
+
 #include "common/assert.h"
 #include "common/debug.h"
 #include "common/div_ceil.h"
@@ -565,6 +569,32 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_fmt) {
             FreeImage(image_id);
             image_id = {};
             LOG_WARNING(Render_Vulkan, "Image overlap resolve failed");
+        }
+    }
+    // TEMPORARY DIAGNOSTIC: one host image per guest address is the invariant the resolution
+    // scaling relies on. Log every case where a new image is created while another image already
+    // covers the same address with a different extent, because then one of the two is never
+    // written and sampling can resolve to the empty one, which shows up as black.
+    if (!image_id && !image_ids.empty() && IsScaledRange(info.guest_address)) {
+        static std::mutex alias_mutex;
+        static std::unordered_set<std::string> alias_seen;
+        std::scoped_lock alias_lock{alias_mutex};
+        for (const auto& cache_id : image_ids) {
+            const auto& other = slot_images[cache_id].info;
+            if (other.guest_address != info.guest_address) {
+                continue;
+            }
+            if (other.size.width == info.size.width && other.size.height == info.size.height) {
+                continue;
+            }
+            const auto sig = fmt::format(
+                "ALIAS {:#x} existing {}x{} gs={:#x} layers={} -> new {}x{} gs={:#x} layers={}",
+                info.guest_address, other.size.width, other.size.height, other.guest_size,
+                other.resources.layers, info.size.width, info.size.height, info.guest_size,
+                info.resources.layers);
+            if (alias_seen.insert(sig).second && alias_seen.size() <= 60) {
+                LOG_WARNING(Render_Vulkan, "{}", sig);
+            }
         }
     }
     // Create and register a new image
