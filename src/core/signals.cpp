@@ -15,6 +15,10 @@
 #ifdef _WIN32
 #include <windows.h>
 static constexpr DWORD MS_VC_EXCEPTION = 0x406D1388;
+// MSVC raises this for every C++ throw. It has to reach the C++ runtime, otherwise the first
+// exception thrown anywhere (a caught std::filesystem_error for instance) is mistaken for an
+// unhandled crash and shuts the emulator down.
+static constexpr DWORD MS_CPP_EXCEPTION = 0xE06D7363;
 #else
 #include <csignal>
 #include <pthread.h>
@@ -120,6 +124,9 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     case DBG_PRINTEXCEPTION_WIDE_C:
         // Used by OutputDebugString functions.
         return EXCEPTION_CONTINUE_EXECUTION;
+    case MS_CPP_EXCEPTION:
+        // Belongs to the C++ runtime: let it run the matching catch handler.
+        return EXCEPTION_CONTINUE_SEARCH;
     case MS_VC_EXCEPTION:
         LOG_DEBUG(Debug, "Pass MS_VC_EXCEPTION at {} to handler", address);
         return EXCEPTION_EXECUTE_HANDLER;
@@ -141,7 +148,17 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
     const bool report_unhandled =
         use_static_windows_guest_red_zone_protection ? static_protection_exception : true;
     if (report_unhandled) {
-        LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        if (code == EXCEPTION_ACCESS_VIOLATION && pExp != nullptr) {
+            const auto* exception_info = pExp->ExceptionRecord->ExceptionInformation;
+            const char* access = exception_info[0] == 0   ? "read"
+                                 : exception_info[0] == 1 ? "write"
+                                                          : "execute";
+            LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {:#x}: {} of {:#x}", code,
+                         reinterpret_cast<u64>(address), access,
+                         static_cast<u64>(exception_info[1]));
+        } else {
+            LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
+        }
         Common::Singleton<Core::Emulator>::Instance()->Shutdown();
     }
 
