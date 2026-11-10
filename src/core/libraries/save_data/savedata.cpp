@@ -1695,8 +1695,9 @@ Error PS4_SYSV_ABI sceSaveDataSyncSaveDataMemory(OrbisSaveDataMemorySync* syncPa
 
     SaveMemory::PersistMemory(slot_id);
     const auto& save_path = SaveMemory::GetSaveDir(slot_id);
-    Backup::NewRequest(syncParam->userId, g_game_serial, save_path,
-                       OrbisSaveDataEventType::SAVE_DATA_MEMORY_SYNC);
+    const bool queued = Backup::NewRequest(syncParam->userId, g_game_serial, save_path,
+                                           OrbisSaveDataEventType::SAVE_DATA_MEMORY_SYNC);
+    LOG_INFO(Lib_SaveData, "Save memory sync slot {} queued backup={}", slot_id, queued);
 
     return Error::OK;
 }

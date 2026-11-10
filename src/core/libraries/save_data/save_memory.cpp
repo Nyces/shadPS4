@@ -59,10 +59,16 @@ void PersistMemory(u32 slot_id, bool lock) {
     while (n++ < 10) {
         try {
             IOFile f;
-            int r = f.Open(memoryPath, Common::FS::FileAccessMode::Create);
+            // Open with read/write sharing: the backup worker copies the same file, and an
+            // exclusive handle here would make the two paths trip over each other.
+            const int r =
+                f.Open(memoryPath, Common::FS::FileAccessMode::Create,
+                       Common::FS::FileType::BinaryFile, Common::FS::FileShareFlag::ShareReadWrite);
             if (f.IsOpen()) {
                 f.WriteRaw<u8>(data.memory_cache.data(), data.memory_cache.size());
                 f.Close();
+                LOG_INFO(Lib_SaveData, "Persisted save memory slot {} ({} bytes)", slot_id,
+                         data.memory_cache.size());
                 return;
             }
             const auto err = std::error_code{r, std::iostream_category()};
@@ -207,23 +213,34 @@ void ReadMemory(u32 slot_id, void* buf, size_t buf_size, int64_t offset) {
             f.ReadSpan(std::span{memory});
         }
     }
-    s64 read_size = buf_size;
-    if (read_size + offset > memory.size()) {
-        read_size = memory.size() - offset;
+    if (offset < 0 || static_cast<size_t>(offset) >= memory.size()) {
+        std::memset(buf, 0, buf_size);
+        return;
     }
-    std::memcpy(buf, memory.data() + offset, read_size);
+    const size_t start = static_cast<size_t>(offset);
+    size_t read_size = buf_size;
+    if (read_size > memory.size() - start) {
+        read_size = memory.size() - start;
+    }
+    std::memcpy(buf, memory.data() + start, read_size);
 }
 
 void WriteMemory(u32 slot_id, void* buf, size_t buf_size, int64_t offset) {
     std::lock_guard lk{g_slot_mtx};
     auto& data = g_attached_slots[slot_id];
-    auto& memory = data.memory_cache;
-    if (offset + buf_size > memory.size()) {
-        memory.resize(offset + buf_size);
+    if (offset < 0 || (buf == nullptr && buf_size != 0)) {
+        return;
     }
-    std::memcpy(memory.data() + offset, buf, buf_size);
-    PersistMemory(slot_id, false);
-    Backup::NewRequest(data.user_id, data.game_serial, GetSaveDir(slot_id),
-                       Backup::OrbisSaveDataEventType::__DO_NOT_SAVE);
+    auto& memory = data.memory_cache;
+    const size_t start = static_cast<size_t>(offset);
+    if (start + buf_size > memory.size()) {
+        memory.resize(start + buf_size);
+    }
+    std::memcpy(memory.data() + start, buf, buf_size);
+    // The buffer used to be flushed to disk here, and a backup request was queued as well, on every
+    // single write. With a large save memory that turned the auto save into a long stall and kept
+    // the backup worker busy, which in turn blocks the setup/restore path that takes the same lock.
+    // The data is persisted once from sceSaveDataSyncSaveDataMemory, which is the API the game uses
+    // to flush its save memory.
 }
 } // namespace Libraries::SaveData::SaveMemory
