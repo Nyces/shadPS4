@@ -410,6 +410,8 @@ static Error saveDataMount(const OrbisSaveDataMount2* mount_info,
         const auto save_path =
             SaveInstance::MakeDirSavePath(mount_info->userId, title_id, mount_info->dirName->data);
         if (Backup::IsBackupExecutingFor(save_path) && g_fw_ver) {
+            LOG_INFO(Lib_SaveData, "Mount blocked, backup running: {}",
+                     mount_info->dirName->data.to_view());
             return Error::BACKUP_BUSY;
         }
     }
@@ -428,6 +430,8 @@ static Error saveDataMount(const OrbisSaveDataMount2* mount_info,
         True(mount_mode & OrbisSaveDataMountMode::DESTRUCT_OFF) || g_fw_ver < ElfInfo::FW_160;
 
     const std::string_view dir_name{mount_info->dirName->data};
+    LOG_INFO(Lib_SaveData, "Mount dir={} user={} mode={:#x}", dir_name, mount_info->userId,
+             static_cast<u32>(mount_info->mountMode));
 
     // find available mount point
     int slot_num = -1;
@@ -521,6 +525,7 @@ static Error Umount(const OrbisSaveDataMountPoint* mountPoint, bool call_backup 
     LOG_DEBUG(Lib_SaveData, "Umount mountPoint:{}", mountPoint->data.to_view());
 
     std::string mount_point_str = mountPoint->data.to_string();
+    LOG_INFO(Lib_SaveData, "Umount mountPoint={} backup={}", mount_point_str, call_backup);
 
     for (auto& instance : g_mount_slots) {
         if (instance.has_value()) {
