@@ -156,6 +156,13 @@ static LONG WINAPI SignalHandler(EXCEPTION_POINTERS* pExp) noexcept {
             LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {:#x}: {} of {:#x}", code,
                          reinterpret_cast<u64>(address), access,
                          static_cast<u64>(exception_info[1]));
+            // Dump a short stack backtrace: guest code runs at its own addresses, so these frames
+            // identify which module/function was executing when the fault happened.
+            void* frames[32]{};
+            const USHORT frame_count = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+            for (USHORT i = 0; i < frame_count; ++i) {
+                LOG_CRITICAL(Debug, "  #{:<2} {:#x}", i, reinterpret_cast<u64>(frames[i]));
+            }
         } else {
             LOG_CRITICAL(Debug, "Unhandled Exception code {:#x} at {}", code, address);
         }
