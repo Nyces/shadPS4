@@ -898,30 +898,35 @@ int PS4_SYSV_ABI sceNpTrophyRegisterContext(OrbisNpTrophyContext context,
         return ORBIS_NP_TROPHY_ERROR_ALREADY_REGISTERED;
     }
 
-    // Resolve trophy-related paths using the context's service_label
+    // Resolve trophy-related paths. The trophy index map is keyed by the trophy file index, while
+    // the game passes its own service label here, so a direct lookup is not always meaningful.
     std::string np_comm_id;
     const auto& trophyMap = Common::ElfInfo::Instance().GetTrophyIndexMap();
-    auto it = trophyMap.find(ctx.service_label);
-    if (it != trophyMap.end()) {
-        // If we have an NP communication ID, prepare proper trophy paths
+    if (const auto it = trophyMap.find(static_cast<s32>(ctx.service_label));
+        it != trophyMap.end()) {
         np_comm_id = it->second;
-
-        const auto trophy_base =
-            Common::FS::GetUserPath(Common::FS::PathType::TrophyDir) / np_comm_id;
-        ctx.xml_save_file = EmulatorSettings.GetHomeDir() / std::to_string(ctx.user_id) / "trophy" /
-                            (np_comm_id + ".xml");
-        ctx.xml_dir = trophy_base / "Xml";
-        ctx.icons_dir = trophy_base / "Icons";
-        ctx.trophy_xml_path = GetTrophyXmlPath(ctx.xml_dir, EmulatorSettings.GetConsoleLanguage());
-
-        if (!std::filesystem::exists(ctx.trophy_xml_path)) {
-            LOG_ERROR(Lib_NpTrophy, "Could not find trophy files.");
-            // Stub success here to prevent issues specific to missing a trophy key.
-        }
+    } else if (trophyMap.size() == 1) {
+        np_comm_id = trophyMap.begin()->second;
     } else {
-        LOG_ERROR(Lib_NpTrophy, "No npCommId found for trophy index/service_label: {}",
-                  ctx.service_label);
-        return ORBIS_NP_UTIL_ERROR_INVALID_TITLEID;
+        // Never fail the registration here. Some games retry it forever when it fails, which
+        // wedges their trophy network thread and can stall the whole game. Fall back to the title
+        // id so every trophy path below stays valid.
+        np_comm_id = std::string{Common::ElfInfo::Instance().GameSerial()};
+        LOG_WARNING(Lib_NpTrophy,
+                    "No npCommId for trophy index/service_label {}, falling back to {}",
+                    ctx.service_label, np_comm_id);
+    }
+
+    const auto trophy_base = Common::FS::GetUserPath(Common::FS::PathType::TrophyDir) / np_comm_id;
+    ctx.xml_save_file = EmulatorSettings.GetHomeDir() / std::to_string(ctx.user_id) / "trophy" /
+                        (np_comm_id + ".xml");
+    ctx.xml_dir = trophy_base / "Xml";
+    ctx.icons_dir = trophy_base / "Icons";
+    ctx.trophy_xml_path = GetTrophyXmlPath(ctx.xml_dir, EmulatorSettings.GetConsoleLanguage());
+
+    if (!std::filesystem::exists(ctx.trophy_xml_path)) {
+        LOG_ERROR(Lib_NpTrophy, "Could not find trophy files.");
+        // Stub success here to prevent issues specific to missing a trophy key.
     }
 
     ctx.registered = true;
