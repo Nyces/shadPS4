@@ -3,9 +3,21 @@
 
 #include <imgui.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include <fmt/format.h>
+
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/native_clock.h"
 #include "common/singleton.h"
+#include "common/thread.h"
+#include "core/aerolib/aerolib.h"
 #include "core/signals.h"
 #include "debug_state.h"
 #include "devtools/widget/common.h"
@@ -38,6 +50,156 @@ static void PauseThread(ThreadID id) {
 #endif
 }
 
+namespace {
+
+struct HleSymbolEntry {
+    u64 address;
+    const char* name;
+};
+
+// Every HLE export is registered here at startup so a sampled program counter can be named.
+std::mutex g_hle_symbols_mutex;
+std::vector<HleSymbolEntry> g_hle_symbols;
+bool g_hle_symbols_sorted = true;
+
+#ifdef _WIN32
+struct StallSampleState {
+    u64 pc{};
+    int identical_samples{};
+    bool reported{};
+};
+
+// Only ever touched by the watchdog thread.
+std::unordered_map<ThreadID, StallSampleState> g_stall_samples;
+
+u64 SampleThreadPc(ThreadID id) {
+    const HANDLE handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, id);
+    if (handle == nullptr) {
+        return 0;
+    }
+    u64 pc{};
+    if (SuspendThread(handle) != static_cast<DWORD>(-1)) {
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(handle, &context)) {
+            pc = context.Rip;
+        }
+        ResumeThread(handle);
+    }
+    CloseHandle(handle);
+    return pc;
+}
+
+const HleSymbolEntry* FindHleSymbol(u64 pc) {
+    if (!g_hle_symbols_sorted) {
+        std::ranges::sort(g_hle_symbols, {}, &HleSymbolEntry::address);
+        g_hle_symbols_sorted = true;
+    }
+    const auto it = std::upper_bound(
+        g_hle_symbols.begin(), g_hle_symbols.end(), pc,
+        [](const u64 value, const HleSymbolEntry& entry) { return value < entry.address; });
+    if (it == g_hle_symbols.begin()) {
+        return nullptr;
+    }
+    return &*(it - 1);
+}
+
+std::string DescribePc(u64 pc) {
+    // A HLE thunk is tiny, so anything further than this belongs to a different export.
+    constexpr u64 MaxThunkDistance = 0x1000;
+    if (const auto* symbol = FindHleSymbol(pc);
+        symbol != nullptr && pc - symbol->address < MaxThunkDistance) {
+        return fmt::format("{}+{:#x}", symbol->name, pc - symbol->address);
+    }
+    // Guest code is mapped in the low address space; anything above it is emulator code the
+    // sampling could not attribute to a single export.
+    constexpr u64 GuestAddressLimit = 0x10'0000'0000;
+    if (pc < GuestAddressLimit) {
+        return fmt::format("guest code at {:#x}", pc);
+    }
+    return fmt::format("emulator code at {:#x}", pc);
+}
+#endif
+
+} // namespace
+
+void RegisterHleFunctionSymbol(u64 host_address, const char* nid) {
+    const auto* entry = Core::AeroLib::FindByNid(nid);
+    const char* name = entry != nullptr ? entry->name : nid;
+    std::scoped_lock lock{g_hle_symbols_mutex};
+    g_hle_symbols.push_back({host_address, name});
+    g_hle_symbols_sorted = g_hle_symbols.size() == 1;
+}
+
+void DebugStateImpl::ReportStalledGuestThreads() {
+#ifdef _WIN32
+    constexpr int SampleIntervalSec = 5;
+    constexpr int SamplesUntilStall = 3;
+
+    std::vector<std::pair<ThreadID, std::string>> threads;
+    {
+        std::scoped_lock lock{guest_threads_mutex};
+        threads.reserve(guest_threads.size() + stall_watchdog_threads.size());
+        for (const ThreadID id : guest_threads) {
+            const auto it = guest_thread_names.find(id);
+            threads.emplace_back(id,
+                                 it != guest_thread_names.end() ? it->second : std::string{"?"});
+        }
+        for (const ThreadID id : stall_watchdog_threads) {
+            const auto it = guest_thread_names.find(id);
+            threads.emplace_back(id,
+                                 it != guest_thread_names.end() ? it->second : std::string{"?"});
+        }
+    }
+
+    const ThreadID self = GetCurrentThreadId();
+    std::vector<u64> pcs(threads.size(), 0);
+    for (size_t i = 0; i < threads.size(); ++i) {
+        if (threads[i].first != self) {
+            pcs[i] = SampleThreadPc(threads[i].first);
+        }
+    }
+
+    std::scoped_lock lock{g_hle_symbols_mutex};
+    for (size_t i = 0; i < threads.size(); ++i) {
+        auto& state = g_stall_samples[threads[i].first];
+        if (pcs[i] == 0) {
+            state = {};
+            continue;
+        }
+        if (pcs[i] == state.pc) {
+            ++state.identical_samples;
+        } else {
+            state = {.pc = pcs[i], .identical_samples = 1, .reported = false};
+        }
+        const bool stalled = state.identical_samples >= SamplesUntilStall;
+        if (!stalled || state.reported) {
+            continue;
+        }
+        state.reported = true;
+        LOG_WARNING(Kernel, "Guest thread '{}' (tid {}) has not moved for {}s, stuck at {}",
+                    threads[i].second, threads[i].first,
+                    state.identical_samples * SampleIntervalSec, DescribePc(pcs[i]));
+    }
+#endif
+}
+
+void StartGuestStallWatchdog() {
+#ifdef _WIN32
+    static std::atomic_bool started{false};
+    if (started.exchange(true)) {
+        return;
+    }
+    std::thread([] {
+        Common::SetCurrentThreadName("StallWatchdog");
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            DebugState.ReportStalledGuestThreads();
+        }
+    }).detach();
+#endif
+}
+
 static void ResumeThread(ThreadID id) {
 #ifdef _WIN32
     auto handle = OpenThread(THREAD_SUSPEND_RESUME, FALSE, id);
@@ -52,12 +214,21 @@ void DebugStateImpl::AddCurrentThreadToGuestList() {
     std::lock_guard lock{guest_threads_mutex};
     const ThreadID id = ThisThreadID();
     guest_threads.push_back(id);
+    guest_thread_names.insert_or_assign(id, Common::GetCurrentThreadName());
 }
 
 void DebugStateImpl::RemoveCurrentThreadFromGuestList() {
     std::lock_guard lock{guest_threads_mutex};
     const ThreadID id = ThisThreadID();
     std::erase_if(guest_threads, [&](const ThreadID& v) { return v == id; });
+    guest_thread_names.erase(id);
+}
+
+void DebugStateImpl::RegisterStallWatchdogThread() {
+    std::lock_guard lock{guest_threads_mutex};
+    const ThreadID id = ThisThreadID();
+    stall_watchdog_threads.push_back(id);
+    guest_thread_names.insert_or_assign(id, Common::GetCurrentThreadName());
 }
 
 void DebugStateImpl::PauseGuestThreads() {

@@ -820,7 +820,9 @@ Error PS4_SYSV_ABI sceSaveDataDirNameSearch(const OrbisSaveDataDirNameSearchCond
         LOG_INFO(Lib_SaveData, "called with invalid parameter");
         return Error::PARAMETER;
     }
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "DirNameSearch user={} dirName={} key={}", cond->userId,
+             cond->dirName != nullptr ? cond->dirName->data.to_view() : std::string_view{},
+             magic_enum::enum_name(cond->key));
     const std::string_view title_id{cond->titleId == nullptr
                                         ? std::string_view{g_game_serial}
                                         : std::string_view{cond->titleId->data}};
@@ -1060,7 +1062,8 @@ Error PS4_SYSV_ABI sceSaveDataGetParam(const OrbisSaveDataMountPoint* mountPoint
         LOG_INFO(Lib_SaveData, "called with invalid parameter");
         return Error::PARAMETER;
     }
-    LOG_DEBUG(Lib_SaveData, "called: paramType = {}", magic_enum::enum_name(paramType));
+    LOG_INFO(Lib_SaveData, "GetParam mountPoint={} paramType={}", mountPoint->data.to_view(),
+             magic_enum::enum_name(paramType));
     const PSF* param_sfo = nullptr;
 
     const std::string_view mount_point_str{mountPoint->data};
@@ -1225,19 +1228,19 @@ int PS4_SYSV_ABI sceSaveDataGetUpdatedDataCount() {
 }
 
 Error PS4_SYSV_ABI sceSaveDataInitialize(void*) {
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "called");
     initialize();
     return Error::OK;
 }
 
 Error PS4_SYSV_ABI sceSaveDataInitialize2(void*) {
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "called");
     initialize();
     return Error::OK;
 }
 
 Error PS4_SYSV_ABI sceSaveDataInitialize3(void*) {
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "called");
     initialize();
     return Error::OK;
 }
@@ -1613,12 +1616,13 @@ Error PS4_SYSV_ABI sceSaveDataSetupSaveDataMemory2(const OrbisSaveDataMemorySetu
         LOG_INFO(Lib_SaveData, "called with invalid parameter");
         return Error::PARAMETER;
     }
-    LOG_DEBUG(Lib_SaveData, "called");
 
     u32 slot_id = 0;
     if (g_fw_ver > ElfInfo::FW_500) {
         slot_id = setupParam->slotId;
     }
+    LOG_INFO(Lib_SaveData, "SetupSaveDataMemory user={} slot={} size={:#x}", setupParam->userId,
+             slot_id, setupParam->memorySize);
 
     const auto& save_path = SaveMemory::GetSavePath(setupParam->userId, slot_id, g_game_serial);
     for (const auto& instance : g_mount_slots) {
@@ -1630,6 +1634,8 @@ Error PS4_SYSV_ABI sceSaveDataSetupSaveDataMemory2(const OrbisSaveDataMemorySetu
     try {
         size_t existed_size = SaveMemory::SetupSaveMemory(setupParam->userId, slot_id,
                                                           g_game_serial, setupParam->memorySize);
+        LOG_INFO(Lib_SaveData, "SetupSaveDataMemory slot {} existedSize={:#x} created={}", slot_id,
+                 existed_size, existed_size == 0);
         if (existed_size == 0) { // Just created
             if (g_fw_ver >= ElfInfo::FW_450 && setupParam->initParam != nullptr) {
                 auto& sfo = SaveMemory::GetParamSFO(slot_id);

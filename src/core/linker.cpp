@@ -13,6 +13,7 @@
 #include "common/thread.h"
 #include "core/aerolib/aerolib.h"
 #include "core/aerolib/stubs.h"
+#include "core/debug_state.h"
 #include "core/devtools/widget/module_list.h"
 #include "core/emulator_settings.h"
 #include "core/file_sys/backends/host_fs.h"
@@ -148,6 +149,7 @@ void Linker::Execute(const std::vector<std::string>& args) {
 
     main_thread.Run([this, module, &args, has_libcinternal](std::stop_token) {
         Common::SetCurrentThreadName("Game:Main");
+        DebugState.RegisterStallWatchdogThread();
 
 #ifndef _WIN32 // Clear any existing signal mask for game threads.
         sigset_t emptyset;

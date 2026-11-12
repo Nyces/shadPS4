@@ -4,6 +4,7 @@
 #include "common/arch.h"
 #include "common/elf_info.h"
 #include "common/singleton.h"
+#include "core/debug_state.h"
 #include "core/libraries/ajm/ajm.h"
 #include "core/libraries/app_content/app_content.h"
 #include "core/libraries/audio/audioin.h"
@@ -95,6 +96,10 @@ void LinkSymbolImpl(Core::Loader::SymbolsResolver* sym, char const* nid, char co
     sr.module = mod;
     sr.type = sym_type;
     sym->AddSymbol(sr, symbol);
+    if (sym_type == Core::Loader::SymbolType::Function) {
+        // Let the stall watchdog name the export a blocked guest thread is sitting in.
+        RegisterHleFunctionSymbol(symbol, nid);
+    }
 }
 
 namespace Libraries {

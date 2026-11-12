@@ -139,6 +139,10 @@ class DebugStateImpl {
 
     std::mutex guest_threads_mutex{};
     std::vector<ThreadID> guest_threads{};
+    std::unordered_map<ThreadID, std::string> guest_thread_names{};
+    // Threads that run guest code but must not be touched by PauseGuestThreads, the main game
+    // thread for instance. They are still sampled by the stall watchdog.
+    std::vector<ThreadID> stall_watchdog_threads{};
     std::atomic_bool is_guest_threads_paused = false;
     u64 pause_time{};
 
@@ -184,6 +188,13 @@ public:
     void AddCurrentThreadToGuestList();
 
     void RemoveCurrentThreadFromGuestList();
+
+    /// Registers the calling thread so the stall watchdog can sample it, without adding it to the
+    /// guest thread list used for pausing.
+    void RegisterStallWatchdogThread();
+
+    /// Samples every known guest thread and logs the ones that have not moved for a while.
+    void ReportStalledGuestThreads();
 
     void PauseGuestThreads();
 
@@ -268,3 +279,11 @@ private:
 } // namespace DebugStateType
 
 extern DebugStateType::DebugStateImpl& DebugState;
+
+/// Remembers the host address of a HLE export together with its name so that a guest thread
+/// sampled while blocked inside it can be reported by name.
+void RegisterHleFunctionSymbol(u64 host_address, const char* nid);
+
+/// Starts a background thread that periodically reports guest threads stuck in one place. This is
+/// what turns "the game hangs on a loading screen" into "this thread sits inside this function".
+void StartGuestStallWatchdog();
