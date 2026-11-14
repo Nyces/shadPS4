@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -63,7 +64,11 @@ std::mutex g_hle_symbols_mutex;
 std::vector<HleSymbolEntry> g_hle_symbols;
 bool g_hle_symbols_sorted = true;
 
-#ifdef _WIN32
+// Every export is registered through a small host-call thunk, so a return address that is further
+// than this from the thunk entry belongs to some other function.
+constexpr u64 MaxThunkDistance = 0x200;
+
+#if defined(_WIN32)
 struct StallSampleState {
     u64 pc{};
     int identical_samples{};
@@ -73,23 +78,31 @@ struct StallSampleState {
 // Only ever touched by the watchdog thread.
 std::unordered_map<ThreadID, StallSampleState> g_stall_samples;
 
-u64 SampleThreadPc(ThreadID id) {
+struct ThreadSample {
+    u64 pc{};
+    u64 sp{};
+};
+
+bool SampleThread(ThreadID id, ThreadSample& sample) {
     const HANDLE handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, id);
     if (handle == nullptr) {
-        return 0;
+        return false;
     }
-    u64 pc{};
+    bool ok = false;
     if (SuspendThread(handle) != static_cast<DWORD>(-1)) {
         CONTEXT context{};
         context.ContextFlags = CONTEXT_CONTROL;
         if (GetThreadContext(handle, &context)) {
-            pc = context.Rip;
+            sample.pc = context.Rip;
+            sample.sp = context.Rsp;
+            ok = true;
         }
         ResumeThread(handle);
     }
     CloseHandle(handle);
-    return pc;
+    return ok;
 }
+#endif
 
 const HleSymbolEntry* FindHleSymbol(u64 pc) {
     if (!g_hle_symbols_sorted) {
@@ -105,9 +118,8 @@ const HleSymbolEntry* FindHleSymbol(u64 pc) {
     return &*(it - 1);
 }
 
+#if defined(_WIN32)
 std::string DescribePc(u64 pc) {
-    // A HLE thunk is tiny, so anything further than this belongs to a different export.
-    constexpr u64 MaxThunkDistance = 0x1000;
     if (const auto* symbol = FindHleSymbol(pc);
         symbol != nullptr && pc - symbol->address < MaxThunkDistance) {
         return fmt::format("HLE {} +{:#x}", symbol->name, pc - symbol->address);
@@ -135,6 +147,43 @@ std::string DescribePc(u64 pc) {
         return fmt::format("guest code at {:#x}", pc);
     }
     return fmt::format("host code at {:#x}", pc);
+}
+
+// Scans the raw stack for return addresses that fall back into an HLE export. A thread parked in a
+// system wait keeps the whole call chain on its stack, so this names the guest APIs it went through
+// without needing a symbol server or a full unwinder.
+std::string CollectHleStackFrames(u64 sp) {
+    constexpr size_t MaxStackBytes = 16 * 1024;
+    constexpr size_t MaxFrames = 10;
+    std::vector<u8> stack(MaxStackBytes);
+    SIZE_T read = 0;
+    if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(sp), stack.data(),
+                          stack.size(), &read) == 0 ||
+        read < sizeof(u64)) {
+        return {};
+    }
+
+    std::string frames;
+    const char* previous = nullptr;
+    size_t count = 0;
+    for (size_t offset = 0; offset + sizeof(u64) <= read; offset += sizeof(u64)) {
+        u64 value{};
+        std::memcpy(&value, stack.data() + offset, sizeof(value));
+        const auto* symbol = FindHleSymbol(value);
+        if (symbol == nullptr || value - symbol->address >= MaxThunkDistance ||
+            symbol->name == previous) {
+            continue;
+        }
+        previous = symbol->name;
+        if (count++ > 0) {
+            frames += " <- ";
+        }
+        frames += symbol->name;
+        if (count >= MaxFrames) {
+            break;
+        }
+    }
+    return frames;
 }
 #endif
 
@@ -170,33 +219,37 @@ void DebugStateImpl::ReportStalledGuestThreads() {
     }
 
     const ThreadID self = GetCurrentThreadId();
-    std::vector<u64> pcs(threads.size(), 0);
+    std::vector<ThreadSample> samples(threads.size());
     for (size_t i = 0; i < threads.size(); ++i) {
         if (threads[i].first != self) {
-            pcs[i] = SampleThreadPc(threads[i].first);
+            SampleThread(threads[i].first, samples[i]);
         }
     }
 
     std::scoped_lock lock{g_hle_symbols_mutex};
     for (size_t i = 0; i < threads.size(); ++i) {
         auto& state = g_stall_samples[threads[i].first];
-        if (pcs[i] == 0) {
+        if (samples[i].pc == 0) {
             state = {};
             continue;
         }
-        if (pcs[i] == state.pc) {
+        if (samples[i].pc == state.pc) {
             ++state.identical_samples;
         } else {
-            state = {.pc = pcs[i], .identical_samples = 1, .reported = false};
+            state = {.pc = samples[i].pc, .identical_samples = 1, .reported = false};
         }
         const bool stalled = state.identical_samples >= SamplesUntilStall;
         if (!stalled || state.reported) {
             continue;
         }
         state.reported = true;
-        LOG_WARNING(Kernel, "Guest thread '{}' (tid {}) has not moved for {}s, stuck at {}",
+        const auto frames = CollectHleStackFrames(samples[i].sp);
+        LOG_WARNING(Kernel, "Guest thread '{}' (tid {}) has not moved for {}s, at {}",
                     threads[i].second, threads[i].first,
-                    state.identical_samples * SampleIntervalSec, DescribePc(pcs[i]));
+                    state.identical_samples * SampleIntervalSec, DescribePc(samples[i].pc));
+        if (!frames.empty()) {
+            LOG_WARNING(Kernel, "  call chain: {}", frames);
+        }
     }
 #endif
 }
