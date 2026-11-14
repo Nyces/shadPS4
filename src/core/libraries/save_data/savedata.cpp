@@ -3,8 +3,10 @@
 
 #include <cstring>
 #include <mutex>
+#include <set>
 #include <span>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <magic_enum/magic_enum.hpp>
@@ -342,6 +344,22 @@ static bool g_initialized = false;
 static std::string g_game_serial;
 static u32 g_fw_ver;
 static std::array<std::optional<SaveInstance>, 16> g_mount_slots;
+
+// Games read and write their save memory in many small chunks. Only the first access of each
+// distinct offset/size pair is logged, otherwise the useful information drowns in repeats.
+enum class SaveMemoryAccessKind : u32 { Read = 0, Write = 1 };
+
+static void LogSaveMemoryAccess(SaveMemoryAccessKind kind, u32 slot_id, s64 offset, size_t size) {
+    static std::mutex mtx;
+    static std::set<std::tuple<u32, u64, size_t, u32>> seen;
+    std::scoped_lock lock{mtx};
+    if (!seen.emplace(slot_id, static_cast<u64>(offset), size, static_cast<u32>(kind)).second) {
+        return;
+    }
+    LOG_INFO(Lib_SaveData, "Save memory {} slot {} offset={:#x} size={:#x}",
+             kind == SaveMemoryAccessKind::Read ? "read" : "write", slot_id,
+             static_cast<u64>(offset), size);
+}
 
 static void initialize() {
     g_initialized = true;
@@ -1185,6 +1203,7 @@ Error PS4_SYSV_ABI sceSaveDataGetSaveDataMemory2(OrbisSaveDataMemoryGet2* getPar
     LOG_DEBUG(Lib_SaveData, "called");
     auto data = getParam->data;
     if (data != nullptr) {
+        LogSaveMemoryAccess(SaveMemoryAccessKind::Read, slot_id, data->offset, data->bufSize);
         SaveMemory::ReadMemory(slot_id, data->buf, data->bufSize, data->offset);
     }
     auto param = getParam->param;
@@ -1564,6 +1583,8 @@ Error PS4_SYSV_ABI sceSaveDataSetSaveDataMemory2(const OrbisSaveDataMemorySet2* 
     auto data = setParam->data;
     if (data != nullptr) {
         for (int i = 0; i < data_num; i++) {
+            LogSaveMemoryAccess(SaveMemoryAccessKind::Write, slot_id, data[i].offset,
+                                data[i].bufSize);
             SaveMemory::WriteMemory(slot_id, data[i].buf, data[i].bufSize, data[i].offset);
         }
     }

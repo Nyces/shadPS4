@@ -16,6 +16,7 @@
 #include "common/logging/log.h"
 #include "common/native_clock.h"
 #include "common/singleton.h"
+#include "common/string_util.h"
 #include "common/thread.h"
 #include "core/aerolib/aerolib.h"
 #include "core/signals.h"
@@ -109,15 +110,31 @@ std::string DescribePc(u64 pc) {
     constexpr u64 MaxThunkDistance = 0x1000;
     if (const auto* symbol = FindHleSymbol(pc);
         symbol != nullptr && pc - symbol->address < MaxThunkDistance) {
-        return fmt::format("{}+{:#x}", symbol->name, pc - symbol->address);
+        return fmt::format("HLE {} +{:#x}", symbol->name, pc - symbol->address);
     }
-    // Guest code is mapped in the low address space; anything above it is emulator code the
-    // sampling could not attribute to a single export.
+    // Name the module so a wait in a system dll can be told apart from code spinning in the
+    // emulator or in the recompiled guest.
+    HMODULE module{};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(pc), &module) != 0 &&
+        module != nullptr) {
+        wchar_t path[MAX_PATH]{};
+        if (GetModuleFileNameW(module, path, MAX_PATH) != 0) {
+            const std::wstring_view name{path};
+            const auto slash = name.find_last_of(L"\\/");
+            return fmt::format("{}+{:#x}",
+                               Common::UTF16ToUTF8(slash == std::wstring_view::npos
+                                                       ? name
+                                                       : name.substr(slash + 1)),
+                               pc - reinterpret_cast<u64>(module));
+        }
+    }
     constexpr u64 GuestAddressLimit = 0x10'0000'0000;
     if (pc < GuestAddressLimit) {
         return fmt::format("guest code at {:#x}", pc);
     }
-    return fmt::format("emulator code at {:#x}", pc);
+    return fmt::format("host code at {:#x}", pc);
 }
 #endif
 
