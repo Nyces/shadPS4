@@ -30,11 +30,6 @@ namespace VideoCore {
 /// on the host side while viewports are scaled to match.
 [[nodiscard]] u32 GetResolutionScale();
 
-/// True if the given guest address belongs to a surface whose host extent was enlarged by the
-/// internal resolution scaling. Passes only need their viewport scaled when they render into such a
-/// surface, which makes the decision exact instead of relying on the guest viewport heuristics.
-[[nodiscard]] bool IsScaledRange(VAddr address);
-
 /// Drops the record of the surface that starts at the given address. Called when its host image is
 /// destroyed, so that an unrelated texture allocated at the same address later does not inherit the
 /// enlarged layout.

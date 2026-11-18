@@ -139,7 +139,23 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
     std::scoped_lock lock{mutex};
     const auto pages_start = PageManager::GetPageAddr(addr);
     const auto pages_end = PageManager::GetNextPageAddr(addr + size - 1);
+    // An enlarged image only exists on the host: its guest store still holds the small layout. Once
+    // the guest writes that block it has been handed to someone else, so the enlarged image and its
+    // record have to go. Otherwise a texture that reuses the block would be served the stale
+    // render.
+    ImageIds rewritten_scaled_images;
     ForEachImageInRegion(pages_start, pages_end - pages_start, [&](ImageId image_id, Image& image) {
+        if (image.info.props.is_scaled) {
+            if (image.usage.vo_surface) {
+                // The flip buffer is presented straight from its host image. Never drop it here,
+                // just release the page so the write can proceed.
+                image.flags |= ImageFlagBits::CpuDirty;
+                UntrackImage(image_id);
+            } else {
+                rewritten_scaled_images.push_back(image_id);
+            }
+            return;
+        }
         const auto image_begin = image.info.guest_address;
         const auto image_end = image.info.guest_address + image.info.guest_size;
         if (image.Overlaps(addr, size)) {
@@ -164,19 +180,33 @@ void TextureCache::InvalidateMemory(VAddr addr, size_t size) {
             MarkAsMaybeDirty(image_id, image);
         }
     });
+    // Freeing has to wait until the page table iteration is done.
+    for (const ImageId image_id : rewritten_scaled_images) {
+        FreeImage(image_id);
+    }
 }
 
 void TextureCache::InvalidateMemoryFromGPU(VAddr address, size_t max_size) {
     std::scoped_lock lock{mutex};
+    ImageIds rewritten_scaled_images;
     ForEachImageInRegion(address, max_size, [&](ImageId image_id, Image& image) {
         // Only consider images that match base address.
         // TODO: Maybe also consider subresources
+        if (image.info.props.is_scaled) {
+            if (image.info.guest_address == address) {
+                rewritten_scaled_images.push_back(image_id);
+            }
+            return;
+        }
         if (image.info.guest_address != address) {
             return;
         }
         // Ensure image is reuploaded when accessed again.
         image.flags |= ImageFlagBits::GpuDirty;
     });
+    for (const ImageId image_id : rewritten_scaled_images) {
+        FreeImage(image_id);
+    }
 }
 
 void TextureCache::UnmapMemory(VAddr cpu_addr, size_t size) {

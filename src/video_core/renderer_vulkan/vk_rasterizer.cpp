@@ -1356,6 +1356,10 @@ void Rasterizer::UpdateViewportScissorState() const {
         // still laying the pass out in its native 1920x1080 space. Surfaces that are already guest
         // sized at 4K and also drawn with 4K viewports (for example the display buffer raised by
         // the patch) are left alone, otherwise the content overflows the screen.
+        // Ask the descriptor of this pass whether its target was enlarged. Looking the address up
+        // in the scaled table would also match smaller surfaces that merely live inside the guest
+        // footprint of an enlarged one, and drawing those with a doubled viewport is what made 2D
+        // layers grow and slide out of place.
         bool guest_hd_space = false;
         u32 target_width = 0;
         for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
@@ -1363,14 +1367,16 @@ void Rasterizer::UpdateViewportScissorState() const {
                 continue;
             }
             const auto& info = cb_descs[cb].second.info;
-            if (VideoCore::IsScaledRange(info.guest_address)) {
+            if (info.props.is_scaled) {
                 guest_hd_space = true;
             }
             target_width = std::max(target_width, info.size.width);
         }
-        if (!guest_hd_space && db_desc.first &&
-            VideoCore::IsScaledRange(db_desc.second.info.guest_address)) {
+        if (!guest_hd_space && db_desc.first && db_desc.second.info.props.is_scaled) {
             guest_hd_space = true;
+        }
+        if (db_desc.first) {
+            target_width = std::max(target_width, db_desc.second.info.size.width);
         }
         if (!guest_hd_space && !regs.IsClipDisabled() && target_width >= 3840 &&
             vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f) {

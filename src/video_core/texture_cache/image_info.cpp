@@ -113,16 +113,6 @@ void ForgetScaledRange(VAddr base) {
     ForgetScaledRangeUnlocked(base);
 }
 
-bool IsScaledRange(VAddr address) {
-    std::scoped_lock lock{g_scaled_mutex};
-    for (const auto& entry : g_scaled_ranges) {
-        if (address >= entry.base && address < entry.base + entry.size) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Grow only surfaces that shape the visible picture. Only the host extent of the surface grows;
 // the guest side of the image keeps describing the small layout so that the memory tracker, the
 // page watchers, the upload/download bounds and the buffer aliasing stay consistent with what the
