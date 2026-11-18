@@ -158,8 +158,8 @@ void ApplyPatchesFromXML(std::filesystem::path path) {
 
                     // A patch may exist only to switch the internal 4K rendering on. It carries no
                     // guest changes, so record that the renderer may enlarge the host surfaces.
-                    if (currentPatchName.find("4K") != std::string::npos) {
-                        resolution_patch_enabled.store(true, std::memory_order_relaxed);
+                    if (currentPatchName.find("4K") != std::string::npos &&
+                        !resolution_patch_enabled.exchange(true, std::memory_order_relaxed)) {
                         LOG_INFO(Loader, "4K resolution patch enabled: {}", currentPatchName);
                     }
 
@@ -314,6 +314,17 @@ void ApplyPendingPatches() {
 }
 
 void PatchMemory(const patchInfo& patch) {
+    // The 4K patch is a pure switch for the host side resolution scaling. It exists so that the
+    // launcher can list and toggle it, and its lines must never be applied to the guest: the image
+    // has no readable gap protection, so a signature that is not found walks past the first
+    // segment into the unmapped hole that follows it.
+    if (patch.modNameStr.find("4K") != std::string::npos) {
+        if (!resolution_patch_enabled.exchange(true, std::memory_order_relaxed)) {
+            LOG_INFO(Loader, "4K resolution patch enabled: {}", patch.modNameStr);
+        }
+        return;
+    }
+
     // Send a request to modify the process memory.
     void* cheatAddress = nullptr;
 
