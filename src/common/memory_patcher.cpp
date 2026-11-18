@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>
 #include <codecvt>
 #include <fstream>
 #include <sstream>
@@ -24,6 +25,10 @@ std::string g_game_serial;
 std::string patch_file;
 bool patches_applied = false;
 std::vector<patchInfo> pending_patches;
+
+// Set when an enabled patch for this game declares itself as the 4K switch. The renderer reads it
+// to decide whether the host surfaces are enlarged; the patch itself changes nothing in the guest.
+static std::atomic_bool resolution_patch_enabled{false};
 
 std::string toHex(u64 value, size_t byteSize) {
     std::stringstream ss;
@@ -151,6 +156,13 @@ void ApplyPatchesFromXML(std::filesystem::path path) {
                     if (metadataAppElf != g_eboot_name)
                         continue;
 
+                    // A patch may exist only to switch the internal 4K rendering on. It carries no
+                    // guest changes, so record that the renderer may enlarge the host surfaces.
+                    if (currentPatchName.find("4K") != std::string::npos) {
+                        resolution_patch_enabled.store(true, std::memory_order_relaxed);
+                        LOG_INFO(Loader, "4K resolution patch enabled: {}", currentPatchName);
+                    }
+
                     auto patchList = it->first_child();
                     for (pugi::xml_node_iterator patchLineIt = patchList.children().begin();
                          patchLineIt != patchList.children().end(); ++patchLineIt) {
@@ -218,6 +230,10 @@ void ApplyPatchesFromXML(std::filesystem::path path) {
     } else {
         LOG_ERROR(Loader, "Could not parse patch XML: {}", result.description());
     }
+}
+
+bool Is4KResolutionPatchEnabled() {
+    return resolution_patch_enabled.load(std::memory_order_relaxed);
 }
 
 void OnGameLoaded() {

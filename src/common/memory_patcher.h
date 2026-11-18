@@ -41,6 +41,10 @@ struct patchInfo {
 
 std::string convertValueToHex(const std::string type, const std::string valueStr);
 
+/// True when an enabled patch for the current game turns the internal 4K rendering on. Such a patch
+/// applies no guest changes: it only acts as the switch for the host side resolution scaling.
+bool Is4KResolutionPatchEnabled();
+
 void OnGameLoaded();
 void AddPatchToQueue(const patchInfo& patchToAdd);
 

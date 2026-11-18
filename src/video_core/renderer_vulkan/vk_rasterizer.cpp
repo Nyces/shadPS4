@@ -16,6 +16,7 @@
 #include "video_core/renderer_vulkan/vk_runtime.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_shader_hle.h"
+#include "video_core/texture_cache/image_info.h"
 #include "video_core/texture_cache/image_view.h"
 #include "video_core/texture_cache/texture_cache.h"
 
@@ -1347,24 +1348,56 @@ void Rasterizer::UpdateViewportScissorState() const {
             viewport.maxDepth = std::min(viewport.maxDepth, 1.f);
         }
 
+        const u32 resolution_scale = VideoCore::GetResolutionScale();
+        const f32 resolution_scale_f = static_cast<f32>(resolution_scale);
+
+        // A pass needs its viewport scaled when it renders into a surface whose host extent we
+        // enlarged, or when the guest allocated the target from the raised 4K screen size while
+        // still laying the pass out in its native 1920x1080 space. Surfaces that are already guest
+        // sized at 4K and also drawn with 4K viewports (for example the display buffer raised by
+        // the patch) are left alone, otherwise the content overflows the screen.
+        bool guest_hd_space = false;
+        u32 target_width = 0;
+        for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
+            if (!cb_descs[cb].first) {
+                continue;
+            }
+            const auto& info = cb_descs[cb].second.info;
+            if (VideoCore::IsScaledRange(info.guest_address)) {
+                guest_hd_space = true;
+            }
+            target_width = std::max(target_width, info.size.width);
+        }
+        if (!guest_hd_space && db_desc.first &&
+            VideoCore::IsScaledRange(db_desc.second.info.guest_address)) {
+            guest_hd_space = true;
+        }
+        if (!guest_hd_space && !regs.IsClipDisabled() && target_width >= 3840 &&
+            vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f) {
+            guest_hd_space = true;
+        }
+        const f32 scale_f = guest_hd_space ? resolution_scale_f : 1.0f;
+        const u32 scale_u = guest_hd_space ? resolution_scale : 1u;
+
         if (regs.IsClipDisabled()) {
             // In case if clipping is disabled we patch the shader to convert vertex position
             // from screen space coordinates to NDC by defining a render space as full hardware
             // window range [0..16383, 0..16383] and setting the viewport to its size.
             viewport.x = 0.f;
             viewport.y = 0.f;
-            viewport.width = float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB));
-            viewport.height = float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB));
+            viewport.width = float(std::min<u32>(instance.GetMaxViewportWidth(), 16_KB * scale_u));
+            viewport.height =
+                float(std::min<u32>(instance.GetMaxViewportHeight(), 16_KB * scale_u));
         } else {
             const auto xoffset = vp_ctl.xoffset_enable ? vp.xoffset : 0.f;
             const auto xscale = vp_ctl.xscale_enable ? vp.xscale : 1.f;
             const auto yoffset = vp_ctl.yoffset_enable ? vp.yoffset : 0.f;
             const auto yscale = vp_ctl.yscale_enable ? vp.yscale : 1.f;
 
-            viewport.x = xoffset - xscale;
-            viewport.y = yoffset - yscale;
-            viewport.width = xscale * 2.0f;
-            viewport.height = yscale * 2.0f;
+            viewport.x = (xoffset - xscale) * scale_f;
+            viewport.y = (yoffset - yscale) * scale_f;
+            viewport.width = xscale * 2.0f * scale_f;
+            viewport.height = yscale * 2.0f * scale_f;
         }
 
         viewports.push_back(viewport);
@@ -1381,8 +1414,9 @@ void Rasterizer::UpdateViewportScissorState() const {
                                               regs.viewport_scissors[i].bottom_right_y);
         }
         scissors.push_back({
-            .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
-            .extent = {vp_scsr.GetWidth(), vp_scsr.GetHeight()},
+            .offset = {vp_scsr.top_left_x * static_cast<s32>(scale_u),
+                       vp_scsr.top_left_y * static_cast<s32>(scale_u)},
+            .extent = {vp_scsr.GetWidth() * scale_u, vp_scsr.GetHeight() * scale_u},
         });
     }
 

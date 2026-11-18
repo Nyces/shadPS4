@@ -81,6 +81,13 @@ void TextureCache::DownloadImageMemory(ImageId image_id, bool sync) {
     if (False(image.flags & ImageFlagBits::GpuModified)) {
         return;
     }
+    if (image.info.props.is_scaled) {
+        // The host image holds the enlarged render while the guest store keeps the small layout.
+        // Writing the larger image back would spill over the surfaces that live right after this
+        // one in guest memory, which corrupted textures, vertex data and everything else stored
+        // nearby.
+        return;
+    }
     const u32 download_size = image.info.pitch * image.info.size.height * image.info.size.depth *
                               image.info.resources.layers * (image.info.num_bits / 8);
     ASSERT(download_size <= image.info.guest_size);
@@ -690,6 +697,7 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
             info.guest_address = desc.info.stencil_addr;
             info.guest_size = desc.info.stencil_size;
             info.size = desc.info.size;
+            info.props.is_scaled = desc.info.props.is_scaled;
             stencil_id = slot_images.Insert(instance, runtime, slot_image_views, info);
             RegisterImage(stencil_id);
         }
@@ -703,6 +711,13 @@ ImageView& TextureCache::FindDepthTarget(ImageId image_id, const ImageDesc& desc
 
 void TextureCache::RefreshImage(Image& image) {
     if (False(image.flags & ImageFlagBits::Dirty) || image.info.num_samples > 1) {
+        return;
+    }
+    if (image.info.props.is_scaled) {
+        // Scaled images are rendered by the GPU at the enlarged extent and their guest store is
+        // still laid out for the small one. Uploading it would replace the frame with stale,
+        // misaligned data, which showed up as black, missing or garbled textures.
+        image.flags &= ~(ImageFlagBits::MaybeCpuDirty | ImageFlagBits::CpuDirty);
         return;
     }
 
@@ -1092,6 +1107,9 @@ void TextureCache::DeleteImage(ImageId image_id) {
         }
         slot_images.Erase(image_id);
     });
+    if (image.info.props.is_scaled) {
+        ForgetScaledRange(image.info.guest_address);
+    }
 }
 
 } // namespace VideoCore

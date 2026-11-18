@@ -1,7 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <mutex>
+#include <utility>
+#include <vector>
+
 #include "common/assert.h"
+#include "common/logging/log.h"
+#include "common/memory_patcher.h"
 #include "core/libraries/kernel/process.h"
 #include "core/libraries/videoout/buffer.h"
 #include "shader_recompiler/resource.h"
@@ -15,6 +22,150 @@ namespace VideoCore {
 using namespace Vulkan;
 using Libraries::VideoOut::TilingMode;
 using VideoOutFormat = Libraries::VideoOut::PixelFormat;
+
+// Internal resolution scale of the emulator. This is a build time constant on purpose: it must be
+// known before the very first image is created so that every surface in a framebuffer ends up with
+// the same size. Change this constant to raise or lower the internal rendering resolution.
+constexpr u32 kInternalResolutionScale = 2;
+
+u32 GetResolutionScale() {
+    // The 4K rendering is opt in through an empty patch that carries no guest changes. Without it
+    // the emulator renders exactly at the guest resolution, which keeps the scaling risk away from
+    // every other game.
+    const bool enabled =
+        kInternalResolutionScale > 1 && MemoryPatcher::Is4KResolutionPatchEnabled();
+    static bool logged = false;
+    if (!logged) {
+        logged = true;
+        if (enabled) {
+            LOG_INFO(Render_Vulkan, "4K resolution patch enabled, host surfaces scaled {}x",
+                     kInternalResolutionScale);
+        } else {
+            LOG_INFO(Render_Vulkan, "No 4K resolution patch, rendering at the guest resolution");
+        }
+    }
+    return enabled ? kInternalResolutionScale : 1;
+}
+
+namespace {
+struct ScaledSurface {
+    VAddr base;
+    u32 size;
+    u32 width;
+    u32 height;
+    u32 pitch;
+};
+std::mutex g_scaled_mutex;
+std::vector<ScaledSurface> g_scaled_ranges;
+
+bool FindScaledSurface(VAddr base, ScaledSurface& out) {
+    std::scoped_lock lock{g_scaled_mutex};
+    for (const auto& entry : g_scaled_ranges) {
+        if (entry.base == base) {
+            out = entry;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Forget a scaled surface once its host image is destroyed. The address can then be reused by an
+// ordinary texture, and keeping the entry would make that texture adopt the enlarged layout of a
+// surface it has nothing to do with.
+static void ForgetScaledRangeUnlocked(VAddr base) {
+    for (auto it = g_scaled_ranges.begin(); it != g_scaled_ranges.end(); ++it) {
+        if (it->base == base) {
+            g_scaled_ranges.erase(it);
+            return;
+        }
+    }
+}
+
+constexpr size_t MaxScaledRanges = 16384;
+
+void RecordScaledRange(VAddr address, u32 size, u32 width, u32 height, u32 pitch) {
+    std::scoped_lock lock{g_scaled_mutex};
+    // Surfaces are recreated constantly, so the same base address gets recorded over and over.
+    // Appending those duplicates silently exhausted the table, and every surface created after the
+    // table filled up was no longer recognized as scaled: its passes fell back to the guest
+    // viewport and drew the 1080p layout into a 4K target, which is what turned the picture into an
+    // upscaled 1080p frame. Keep one entry per base address instead.
+    for (auto& entry : g_scaled_ranges) {
+        if (entry.base == address) {
+            entry = {address, size, width, height, pitch};
+            return;
+        }
+    }
+    if (g_scaled_ranges.size() < MaxScaledRanges) {
+        g_scaled_ranges.push_back({address, size, width, height, pitch});
+    } else {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            LOG_ERROR(Render_Vulkan, "Scaled surface table is full, {} entries", MaxScaledRanges);
+        }
+    }
+}
+} // namespace
+
+void ForgetScaledRange(VAddr base) {
+    std::scoped_lock lock{g_scaled_mutex};
+    ForgetScaledRangeUnlocked(base);
+}
+
+bool IsScaledRange(VAddr address) {
+    std::scoped_lock lock{g_scaled_mutex};
+    for (const auto& entry : g_scaled_ranges) {
+        if (address >= entry.base && address < entry.base + entry.size) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Grow only surfaces that shape the visible picture. Only the host extent of the surface grows;
+// the guest side of the image keeps describing the small layout so that the memory tracker, the
+// page watchers, the upload/download bounds and the buffer aliasing stay consistent with what the
+// guest actually owns. Smaller textures and already large surfaces are left untouched.
+static void ApplyResolutionScale(ImageInfo& info) {
+    const u32 scale = GetResolutionScale();
+    if (scale == 1) {
+        return;
+    }
+    const u32 width = info.size.width;
+    const u32 height = info.size.height;
+    // The surfaces the game flips are 1920x1080 (or 1920x1080 with a taller tile alignment).
+    const bool screen_sized = width == 1920 && height >= 1080 && height <= 1152;
+    // Square offscreen plates hold the character and the other large renders. They are drawn with a
+    // normal viewport into their own surface and then sampled by the composite, so enlarging them
+    // adds real detail without moving anything on screen. Without this the plate is produced at
+    // 840x840 or 1680x1680 and the 4K output is only an upscale, which is why the 3D content looks
+    // exactly as aliased as it does at 1080p. Their mip levels (210x210, 52x52, ...) stay below the
+    // bound and are left at the guest size.
+    const bool square_plate = width == height && width >= 768 && width <= 1920;
+    if (!screen_sized && !square_plate) {
+        return;
+    }
+    const u32 guest_size = info.guest_size;
+    info.size.width *= scale;
+    info.size.height *= scale;
+    info.pitch *= scale;
+    // Rebuild the whole layout for the larger extent. Patching the fields by hand left the mip
+    // heights, mip pitches and mip offsets describing the old 1080p layout, so a tiled surface with
+    // mip levels (the UI blur pyramid for instance) addressed the wrong memory and each level
+    // overwrote the next one.
+    info.UpdateSize();
+    // Only the host extent grows. Everything that indexes guest memory has to keep seeing the
+    // guest layout: the page table, the overlap resolution, the uploads and downloads and the
+    // buffer aliasing all use these fields, and letting a scaled surface claim four times the
+    // memory it really owns made it overlap unrelated textures. Those were then invalidated and
+    // re-uploaded from the wrong place, which showed up as black, missing or garbled sprites. The
+    // mip table keeps describing the host image, which the host side copies rely on.
+    info.guest_size = guest_size;
+    info.props.is_scaled = 1;
+    RecordScaledRange(info.guest_address, guest_size, info.size.width, info.size.height,
+                      info.pitch);
+}
 
 static vk::Format ConvertPixelFormat(const VideoOutFormat format) {
     switch (format) {
@@ -51,6 +202,7 @@ ImageInfo::ImageInfo(const Libraries::VideoOut::BufferAttributeGroup& group,
 
     guest_address = cpu_address;
     UpdateSize();
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint) noexcept {
@@ -80,6 +232,7 @@ ImageInfo::ImageInfo(const AmdGpu::ColorBuffer& buffer, AmdGpu::CbDbExtent hint)
         mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && buffer.info.alt_tile_mode;
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr htile_address,
@@ -113,6 +266,7 @@ ImageInfo::ImageInfo(const AmdGpu::DepthBuffer& buffer, u32 num_slices, VAddr ht
         guest_size *= resources.layers;
         mips_layout[0] = MipInfo(guest_size, pitch, size.height, 0);
     }
+    ApplyResolutionScale(*this);
 }
 
 ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& desc) noexcept {
@@ -142,6 +296,30 @@ ImageInfo::ImageInfo(const AmdGpu::Image& image, const Shader::ImageResource& de
 
     alt_tile = Libraries::Kernel::sceKernelIsNeoMode() && image.alt_tile_mode;
     UpdateSize();
+    // If this address already backs a scaled render target, adopt exactly the same extent, pitch
+    // and layout the render path recorded. Scaling only the extent keeps the two values
+    // disagreeing, and the texture cache then keeps a second, never written image over the same
+    // memory, which is what leaves sampled layers such as the blurred background black.
+    // Restrict this to the recorded surface itself: its descriptor starts exactly at the recorded
+    // base and is the guest sized version of it. A texture that merely starts inside a scaled range
+    // has nothing to do with the enlarged surface (the game packs many small character textures
+    // into the same block), and adopting the larger extent made it sample the wrong memory, which
+    // showed up as black, missing or garbled sprites.
+    ScaledSurface scaled{};
+    const u32 scale = GetResolutionScale();
+    if (FindScaledSurface(image.Address(), scaled) && scaled.width == size.width * scale &&
+        scaled.height == size.height * scale) {
+        const u32 guest_footprint = guest_size;
+        size.width = scaled.width;
+        size.height = scaled.height;
+        pitch = scaled.pitch;
+        // Rebuild the host layout so the sampled image matches the render target region for
+        // region, but keep the guest footprint of the descriptor: the sampled surface still owns
+        // only its guest sized range of memory.
+        UpdateSize();
+        guest_size = guest_footprint;
+        props.is_scaled = 1;
+    }
 }
 
 bool ImageInfo::IsCompatible(const ImageInfo& info) const {
