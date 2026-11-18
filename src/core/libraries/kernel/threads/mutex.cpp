@@ -1,12 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <thread>
 #include <fmt/format.h>
 
 #include "common/arch.h"
 #include "common/assert.h"
 #include "common/types.h"
+#include "core/debug_state.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
@@ -262,7 +264,17 @@ s32 PS4_SYSV_ABI posix_pthread_mutex_trylock(PthreadMutexT* mutex) {
 
 s32 PS4_SYSV_ABI posix_pthread_mutex_lock(PthreadMutexT* mutex) {
     CHECK_AND_INIT_MUTEX
-    return (*mutex)->Lock(nullptr);
+    const auto start = std::chrono::steady_clock::now();
+    BeginGuestWait("mutex", (*mutex)->name.c_str());
+    const s32 result = (*mutex)->Lock(nullptr);
+    EndGuestWait();
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited >= std::chrono::seconds(3)) {
+        // A lock that takes seconds means the owner is stuck or the two threads wait on each other.
+        LOG_WARNING(Lib_Kernel, "pthread_mutex_lock '{}' blocked for {} ms", (*mutex)->name,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(waited).count());
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI posix_pthread_mutex_timedlock(PthreadMutexT* mutex,

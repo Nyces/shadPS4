@@ -3,6 +3,7 @@
 
 #include "save_memory.h"
 
+#include <algorithm>
 #include <condition_variable>
 #include <filesystem>
 #include <mutex>
@@ -40,10 +41,13 @@ struct SlotData {
     PSF sfo;
     std::vector<u8> memory_cache;
     size_t memory_cache_size{};
+    bool memory_loaded{};
 };
 
 static std::mutex g_slot_mtx;
 static std::unordered_map<u32, SlotData> g_attached_slots;
+
+static void EnsureLoadedLocked(SlotData& data);
 
 void PersistMemory(u32 slot_id, bool lock) {
     std::unique_lock lck{g_slot_mtx, std::defer_lock};
@@ -51,6 +55,11 @@ void PersistMemory(u32 slot_id, bool lock) {
         lck.lock();
     }
     auto& data = g_attached_slots[slot_id];
+    if (!data.memory_loaded) {
+        // Nothing was read or written since the slot was set up, so there is nothing to flush.
+        // Writing the empty buffer here would wipe the save that is already on disk.
+        return;
+    }
     auto memoryPath = data.folder_path / FilenameSaveDataMemory;
     fs::create_directories(memoryPath.parent_path());
 
@@ -59,10 +68,16 @@ void PersistMemory(u32 slot_id, bool lock) {
     while (n++ < 10) {
         try {
             IOFile f;
-            int r = f.Open(memoryPath, Common::FS::FileAccessMode::Create);
+            // Open with read/write sharing: the backup worker copies the same file, and an
+            // exclusive handle here would make the two paths trip over each other.
+            const int r =
+                f.Open(memoryPath, Common::FS::FileAccessMode::Create,
+                       Common::FS::FileType::BinaryFile, Common::FS::FileShareFlag::ShareReadWrite);
             if (f.IsOpen()) {
                 f.WriteRaw<u8>(data.memory_cache.data(), data.memory_cache.size());
                 f.Close();
+                LOG_INFO(Lib_SaveData, "Persisted save memory slot {} ({} bytes)", slot_id,
+                         data.memory_cache.size());
                 return;
             }
             const auto err = std::error_code{r, std::iostream_category()};
@@ -104,33 +119,54 @@ size_t SetupSaveMemory(Libraries::UserService::OrbisUserServiceUserId user_id, u
     const auto save_dir = GetSavePath(user_id, slot_id, game_serial);
 
     auto& data = g_attached_slots[slot_id];
-    data = SlotData{
-        .user_id = user_id,
-        .game_serial = std::string{game_serial},
-        .folder_path = save_dir,
-        .sfo = {},
-        .memory_cache = {},
-        .memory_cache_size = memory_size,
-    };
-
-    SaveInstance::SetupDefaultParamSFO(data.sfo, GetSaveDir(slot_id), std::string{game_serial});
+    // Games are allowed to call setup more than once, e.g. once to probe the size that already
+    // exists and again with the real size. Rebuilding the slot from scratch on every call threw
+    // away everything the game had written and shrank the buffer to the last requested size, so
+    // reads past that point came back as zeros.
+    const bool same_slot = data.user_id == user_id &&
+                           data.game_serial == std::string{game_serial} &&
+                           data.folder_path == save_dir;
+    if (!same_slot) {
+        data = SlotData{
+            .user_id = user_id,
+            .game_serial = std::string{game_serial},
+            .folder_path = save_dir,
+            .sfo = {},
+            .memory_cache = {},
+            .memory_cache_size = memory_size,
+        };
+        SaveInstance::SetupDefaultParamSFO(data.sfo, GetSaveDir(slot_id), std::string{game_serial});
+    }
 
     auto param_sfo_path = SaveInstance::GetParamSFOPath(save_dir);
     if (!fs::exists(param_sfo_path)) {
         return 0;
     }
 
-    if (!data.sfo.Open(param_sfo_path) || fs::exists(save_dir / CorruptFileName)) {
+    if (!same_slot && !data.sfo.Open(param_sfo_path)) {
         if (!Backup::Restore(save_dir)) { // Could not restore the backup
             return 0;
         }
+        data.sfo.Open(param_sfo_path);
+    }
+
+    if (fs::exists(save_dir / CorruptFileName)) {
+        if (!Backup::Restore(save_dir)) { // Could not restore the backup
+            return 0;
+        }
+        data.sfo.Open(param_sfo_path);
     }
 
     const auto memory = save_dir / FilenameSaveDataMemory;
     if (fs::exists(memory)) {
-        return fs::file_size(memory);
+        const auto existed_size = static_cast<size_t>(fs::file_size(memory));
+        // The buffer must be able to hold the existing data even when the game asks for less,
+        // otherwise the part of the save beyond the requested size can not be read back.
+        data.memory_cache_size = std::max({memory_size, existed_size, data.memory_cache.size()});
+        return existed_size;
     }
 
+    data.memory_cache_size = std::max(memory_size, data.memory_cache.size());
     return 0;
 }
 
@@ -195,35 +231,71 @@ void SaveSFO(u32 slot_id) {
     }
 }
 
+// Called with g_slot_mtx held. Makes sure the whole save memory is in the cache so reads and
+// writes never operate on a buffer that is smaller than the data already on disk.
+static void EnsureLoadedLocked(SlotData& data) {
+    if (data.memory_loaded) {
+        if (data.memory_cache.size() < data.memory_cache_size) {
+            data.memory_cache.resize(data.memory_cache_size);
+        }
+        return;
+    }
+    data.memory_cache.resize(std::max(data.memory_cache_size, data.memory_cache.size()));
+    IOFile f{data.folder_path / FilenameSaveDataMemory, Common::FS::FileAccessMode::Read};
+    if (f.IsOpen()) {
+        f.Seek(0);
+        f.ReadSpan(std::span{data.memory_cache});
+    }
+    data.memory_loaded = true;
+}
+
 void ReadMemory(u32 slot_id, void* buf, size_t buf_size, int64_t offset) {
     std::lock_guard lk{g_slot_mtx};
     auto& data = g_attached_slots[slot_id];
+    EnsureLoadedLocked(data);
     auto& memory = data.memory_cache;
-    if (memory.empty()) { // Load file
-        memory.resize(data.memory_cache_size);
-        IOFile f{data.folder_path / FilenameSaveDataMemory, Common::FS::FileAccessMode::Read};
-        if (f.IsOpen()) {
-            f.Seek(0);
-            f.ReadSpan(std::span{memory});
-        }
+    if (offset < 0 || static_cast<size_t>(offset) >= memory.size()) {
+        LOG_WARNING(Lib_SaveData,
+                    "Read outside save memory slot {}: offset={:#x} size={:#x} cache={:#x}",
+                    slot_id, static_cast<u64>(offset), buf_size, memory.size());
+        std::memset(buf, 0, buf_size);
+        return;
     }
-    s64 read_size = buf_size;
-    if (read_size + offset > memory.size()) {
-        read_size = memory.size() - offset;
+    const size_t start = static_cast<size_t>(offset);
+    size_t read_size = buf_size;
+    if (read_size > memory.size() - start) {
+        LOG_WARNING(
+            Lib_SaveData,
+            "Read clipped at end of save memory slot {}: offset={:#x} size={:#x} cache={:#x}",
+            slot_id, static_cast<u64>(offset), buf_size, memory.size());
+        read_size = memory.size() - start;
     }
-    std::memcpy(buf, memory.data() + offset, read_size);
+    std::memcpy(buf, memory.data() + start, read_size);
+    if (read_size < buf_size) {
+        std::memset(static_cast<u8*>(buf) + read_size, 0, buf_size - read_size);
+    }
 }
 
 void WriteMemory(u32 slot_id, void* buf, size_t buf_size, int64_t offset) {
     std::lock_guard lk{g_slot_mtx};
     auto& data = g_attached_slots[slot_id];
-    auto& memory = data.memory_cache;
-    if (offset + buf_size > memory.size()) {
-        memory.resize(offset + buf_size);
+    if (offset < 0 || (buf == nullptr && buf_size != 0)) {
+        return;
     }
-    std::memcpy(memory.data() + offset, buf, buf_size);
-    PersistMemory(slot_id, false);
-    Backup::NewRequest(data.user_id, data.game_serial, GetSaveDir(slot_id),
-                       Backup::OrbisSaveDataEventType::__DO_NOT_SAVE);
+    EnsureLoadedLocked(data);
+    auto& memory = data.memory_cache;
+    const size_t start = static_cast<size_t>(offset);
+    if (start + buf_size > memory.size()) {
+        LOG_WARNING(Lib_SaveData,
+                    "Write past end of save memory slot {}: offset={:#x} size={:#x} cache={:#x}",
+                    slot_id, static_cast<u64>(offset), buf_size, memory.size());
+        memory.resize(start + buf_size);
+    }
+    std::memcpy(memory.data() + start, buf, buf_size);
+    // The buffer used to be flushed to disk here, and a backup request was queued as well, on every
+    // single write. With a large save memory that turned the auto save into a long stall and kept
+    // the backup worker busy, which in turn blocks the setup/restore path that takes the same lock.
+    // The data is persisted once from sceSaveDataSyncSaveDataMemory, which is the API the game uses
+    // to flush its save memory.
 }
 } // namespace Libraries::SaveData::SaveMemory

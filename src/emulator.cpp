@@ -29,6 +29,7 @@
 #include "common/scm_rev.h"
 #include "common/singleton.h"
 #include "core/cpu_patches.h" // Windows static guest red-zone protection
+#include "core/debug_state.h"
 #include "core/debugger.h"
 #include "core/devtools/widget/module_list.h"
 #include "core/emulator_settings.h"
@@ -702,6 +703,7 @@ void Emulator::Run(std::filesystem::path file, std::vector<std::string> args,
     }
 
     linker->Execute(args);
+    StartGuestStallWatchdog();
 
     window->InitTimers();
     while (window->IsOpen()) {

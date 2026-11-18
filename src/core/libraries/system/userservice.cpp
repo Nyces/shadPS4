@@ -1,6 +1,11 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <deque>
+#include <mutex>
 #include <queue>
 
 #include "common/logging/log.h"
@@ -116,28 +121,73 @@ int PS4_SYSV_ABI sceUserServiceGetDiscPlayerFlag() {
     return ORBIS_OK;
 }
 
-std::queue<OrbisUserServiceEvent> user_service_event_queue = {};
+// The guest polls this queue from game threads while the frontend pushes login and logout events
+// into it, so the queue needs its own lock.
+static std::mutex g_event_queue_mutex;
+static std::deque<OrbisUserServiceEvent> user_service_event_queue;
 
 void AddUserServiceEvent(const OrbisUserServiceEvent e) {
     LOG_DEBUG(Lib_UserService, "Event added to queue: {} {}", (u8)e.event, e.userId);
-    user_service_event_queue.push(e);
+    std::scoped_lock lock{g_event_queue_mutex};
+    user_service_event_queue.push_back(e);
+}
+
+// Reports every logged in user as a login event. A game that initializes the user service learns
+// who is playing this way; after a restart it otherwise polls sceUserServiceGetEvent forever
+// because the login event was already consumed before the restart.
+static void ReportLoggedInUsers() {
+    std::scoped_lock lock{g_event_queue_mutex};
+    for (const auto* user : UserManagement.GetLoggedInUsers()) {
+        if (user == nullptr || !user->logged_in) {
+            continue;
+        }
+        const bool already_queued =
+            std::ranges::any_of(user_service_event_queue, [&](const OrbisUserServiceEvent& queued) {
+                return queued.event == OrbisUserServiceEventType::Login &&
+                       queued.userId == user->user_id;
+            });
+        if (already_queued) {
+            continue;
+        }
+        user_service_event_queue.push_back({OrbisUserServiceEventType::Login, user->user_id});
+        LOG_INFO(Lib_UserService, "Queued login event for user {}", user->user_id);
+    }
 }
 
 s32 PS4_SYSV_ABI sceUserServiceGetEvent(OrbisUserServiceEvent* event) {
     LOG_TRACE(Lib_UserService, "called");
 
-    if (!user_service_event_queue.empty()) {
-        OrbisUserServiceEvent& temp = user_service_event_queue.front();
-        event->event = temp.event;
-        event->userId = temp.userId;
-        user_service_event_queue.pop();
-        Libraries::Np::NpManager::NotifyNpStateFromUserServiceEvent(temp.event, temp.userId);
-        LOG_INFO(Lib_UserService, "Event processed by the game: {} {}", (u8)temp.event,
-                 temp.userId);
-        return ORBIS_OK;
+    if (event == nullptr) {
+        return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT;
     }
 
-    return ORBIS_USER_SERVICE_ERROR_NO_EVENT;
+    OrbisUserServiceEvent delivered{};
+    {
+        std::scoped_lock lock{g_event_queue_mutex};
+        if (user_service_event_queue.empty()) {
+            // Games poll this every frame while they wait for a login/logout notification, so a
+            // single sample per second is enough to see that the poll is happening.
+            static std::atomic<u64> last_log_us{};
+            const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now().time_since_epoch())
+                                    .count();
+            u64 previous = last_log_us.load(std::memory_order_relaxed);
+            if (static_cast<u64>(now_us) - previous >= 1'000'000 &&
+                last_log_us.compare_exchange_strong(previous, static_cast<u64>(now_us))) {
+                LOG_INFO(Lib_UserService, "GetEvent -> no event");
+            }
+            return ORBIS_USER_SERVICE_ERROR_NO_EVENT;
+        }
+        delivered = user_service_event_queue.front();
+        user_service_event_queue.pop_front();
+    }
+
+    event->event = delivered.event;
+    event->userId = delivered.userId;
+    Libraries::Np::NpManager::NotifyNpStateFromUserServiceEvent(delivered.event, delivered.userId);
+    LOG_INFO(Lib_UserService, "Event processed by the game: {} {}", (u8)delivered.event,
+             delivered.userId);
+    return ORBIS_OK;
 }
 
 int PS4_SYSV_ABI sceUserServiceGetEventCalendarType() {
@@ -1172,11 +1222,13 @@ int PS4_SYSV_ABI sceUserServiceGetVolumeForSidetone() {
 
 s32 PS4_SYSV_ABI sceUserServiceInitialize(const OrbisUserServiceInitializeParams* initParams) {
     LOG_WARNING(Lib_UserService, "(dummy) called");
+    ReportLoggedInUsers();
     return ORBIS_OK;
 }
 
 int PS4_SYSV_ABI sceUserServiceInitialize2() {
     LOG_ERROR(Lib_UserService, "(STUBBED) called");
+    ReportLoggedInUsers();
     return ORBIS_OK;
 }
 

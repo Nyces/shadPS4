@@ -167,6 +167,8 @@ static int JoinThread(PthreadT pthread, void** thread_return, const OrbisKernelT
         return pthread->tid.load(std::memory_order_acquire) == TidTerminated ||
                curthread->ShouldCancel();
     };
+    const std::string join_target_name{pthread->name};
+    BeginGuestWait("join thread", join_target_name.c_str());
     while (pthread->tid.load(std::memory_order_acquire) != TidTerminated) {
         if (curthread->ShouldCancel()) {
             wait_lock.unlock();
@@ -180,6 +182,7 @@ static int JoinThread(PthreadT pthread, void** thread_return, const OrbisKernelT
             break;
         }
     }
+    EndGuestWait();
     wait_lock.unlock();
 
     curthread->cancel_point = false;

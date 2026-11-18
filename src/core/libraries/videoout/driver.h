@@ -5,6 +5,7 @@
 
 #include "common/debug.h"
 #include "common/polyfill_thread.h"
+#include "core/debug_state.h"
 #include "core/libraries/videoout/video_out.h"
 
 #include <condition_variable>
@@ -52,7 +53,9 @@ struct VideoOutPort {
 
     void WaitVoLabel(auto&& pred) {
         std::unique_lock lk{vo_mutex};
+        BeginGuestWait("vo label", "video out");
         vo_cv.wait(lk, pred);
+        EndGuestWait();
     }
 
     void SignalVoLabel() {

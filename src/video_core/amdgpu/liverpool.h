@@ -17,6 +17,7 @@
 #include "common/slot_vector.h"
 #include "common/types.h"
 #include "common/unique_function.h"
+#include "core/debug_state.h"
 #include "video_core/amdgpu/cb_db_extent.h"
 #include "video_core/amdgpu/regs.h"
 
@@ -80,7 +81,9 @@ public:
 
     void WaitGpuIdle() noexcept {
         std::unique_lock lk{submit_mutex};
+        BeginGuestWait("gpu idle", "gpu");
         submit_cv.wait(lk, [this] { return num_submits == 0; });
+        EndGuestWait();
     }
 
     bool IsGpuIdle() const {
@@ -108,7 +111,9 @@ public:
                 ++num_commands;
                 submit_cv.notify_one();
             }
+            BeginGuestWait("gpu command", "gpu");
             sem.acquire();
+            EndGuestWait();
         } else {
             std::scoped_lock lk{submit_mutex};
             command_queue.emplace(std::move(func));

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <condition_variable>
 #include <list>
 #include <mutex>
@@ -8,11 +9,24 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "core/debug_state.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/libs.h"
 #include "pthread.h"
 
 namespace Libraries::Kernel {
+
+// Polls come once per frame, so log at most one sample per second.
+static bool LogOncePerSecond(std::atomic<u64>& last_log_us) {
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    u64 previous = last_log_us.load(std::memory_order_relaxed);
+    if (static_cast<u64>(now_us) - previous < 1'000'000) {
+        return false;
+    }
+    return last_log_us.compare_exchange_strong(previous, static_cast<u64>(now_us));
+}
 
 constexpr int ORBIS_KERNEL_EVF_ATTR_TH_FIFO = 0x01;
 constexpr int ORBIS_KERNEL_EVF_ATTR_TH_PRIO = 0x02;
@@ -51,6 +65,10 @@ public:
     EventFlagInternal(const std::string& name, ThreadMode thread_mode, QueueMode queue_mode,
                       u64 bits)
         : m_name(name), m_thread_mode(thread_mode), m_queue_mode(queue_mode), m_bits(bits) {}
+
+    [[nodiscard]] const std::string& Name() const {
+        return m_name;
+    }
 
     ~EventFlagInternal() {
         std::unique_lock lock{m_mutex};
@@ -291,6 +309,8 @@ int PS4_SYSV_ABI sceKernelCreateEventFlag(OrbisKernelEventFlag* ef, const char* 
     }
 
     *ef = new EventFlagInternal(std::string(pName), thread_mode, queue_mode, initPattern);
+    LOG_INFO(Kernel_Event, "CreateEventFlag name='{}' attr={:#x} init={:#x} handle={}", pName, attr,
+             initPattern, static_cast<void*>(*ef));
     return ORBIS_OK;
 }
 
@@ -382,6 +402,15 @@ int PS4_SYSV_ABI sceKernelPollEventFlag(OrbisKernelEventFlag ef, u64 bitPattern,
 
     auto result = ef->Poll(bitPattern, wait, clear, pResultPat);
 
+    {
+        static std::atomic<u64> last_log_us{};
+        if (LogOncePerSecond(last_log_us)) {
+            LOG_INFO(Kernel_Event,
+                     "PollEventFlag '{}' bits={:#x} mode={:#x} result={:#x} current={:#x}",
+                     ef->Name(), bitPattern, waitMode, result, pResultPat ? *pResultPat : 0);
+        }
+    }
+
     if (result != ORBIS_OK && result != ORBIS_KERNEL_ERROR_EBUSY) {
         LOG_DEBUG(Kernel_Event, "returned {:#x}", result);
     }
@@ -426,7 +455,22 @@ int PS4_SYSV_ABI sceKernelWaitEventFlag(OrbisKernelEventFlag ef, u64 bitPattern,
         UNREACHABLE();
     }
 
+    const auto start = std::chrono::steady_clock::now();
+    BeginGuestWait("event flag", ef->Name().c_str());
     const int result = ef->Wait(bitPattern, wait, clear, pResultPat, pTimeout);
+    EndGuestWait();
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited >= std::chrono::seconds(3)) {
+        // A guest thread that sits in the same wait for seconds is normally a stall, and the event
+        // flag name says which subsystem never signalled it.
+        const auto waited_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count();
+        LOG_WARNING(Kernel_Event,
+                    "WaitEventFlag '{}' blocked for {} ms bits={:#x} mode={:#x} timeout={} "
+                    "result={:#x} handle={}",
+                    ef->Name(), waited_ms, bitPattern, waitMode, pTimeout ? *pTimeout : 0, result,
+                    static_cast<void*>(ef));
+    }
     if (result != ORBIS_OK && result != ORBIS_KERNEL_ERROR_ETIMEDOUT) {
         LOG_DEBUG(Kernel_Event, "returned {:#x}", result);
     }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <condition_variable>
 #include <limits>
 #include <list>
@@ -11,6 +12,7 @@
 
 #include "common/logging/log.h"
 #include "common/slot_vector.h"
+#include "core/debug_state.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/orbis_error.h"
 #include "core/libraries/kernel/posix_error.h"
@@ -330,7 +332,19 @@ s32 PS4_SYSV_ABI sceKernelWaitSema(OrbisKernelSema sem, s32 needCount, u32* pTim
     if (!orbis_sems.IsAllocated(sem)) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[sem].Wait(true, needCount, pTimeout);
+    auto& object = orbis_sems[sem];
+    const auto start = std::chrono::steady_clock::now();
+    BeginGuestWait("semaphore", object.name.c_str());
+    const s32 result = object.Wait(true, needCount, pTimeout);
+    EndGuestWait();
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited >= std::chrono::seconds(3)) {
+        const auto waited_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(waited).count();
+        LOG_WARNING(Lib_Kernel, "WaitSema '{}' blocked for {} ms need={} result={:#x}", object.name,
+                    waited_ms, needCount, result);
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceKernelSignalSema(OrbisKernelSema sem, s32 signalCount) {
@@ -347,7 +361,21 @@ s32 PS4_SYSV_ABI sceKernelPollSema(OrbisKernelSema sem, s32 needCount) {
     if (!orbis_sems.IsAllocated(sem)) {
         return ORBIS_KERNEL_ERROR_ESRCH;
     }
-    return orbis_sems[sem].Wait(false, needCount, nullptr);
+    auto& object = orbis_sems[sem];
+    const s32 result = object.Wait(false, needCount, nullptr);
+    {
+        static std::atomic<u64> last_log_us{};
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        u64 previous = last_log_us.load(std::memory_order_relaxed);
+        if (static_cast<u64>(now_us) - previous >= 1'000'000 &&
+            last_log_us.compare_exchange_strong(previous, static_cast<u64>(now_us))) {
+            LOG_INFO(Lib_Kernel, "PollSema '{}' need={} result={:#x}", object.name, needCount,
+                     result);
+        }
+    }
+    return result;
 }
 
 s32 PS4_SYSV_ABI sceKernelCancelSema(OrbisKernelSema sem, s32 setCount, s32* pNumWaitThreads) {

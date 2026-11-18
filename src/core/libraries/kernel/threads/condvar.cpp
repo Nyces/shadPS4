@@ -7,6 +7,7 @@
 #include <fmt/format.h>
 
 #include "common/assert.h"
+#include "core/debug_state.h"
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/kernel/posix_error.h"
 #include "core/libraries/kernel/threads/pthread.h"
@@ -201,7 +202,16 @@ int PthreadCond::Wait(PthreadMutexT* mutex, const OrbisKernelTimespec* abstime, 
 int PS4_SYSV_ABI posix_pthread_cond_wait(PthreadCondT* cond, PthreadMutexT* mutex) {
     PthreadCond* cvp{};
     CHECK_AND_INIT_COND
-    return cvp->Wait(mutex, nullptr);
+    const auto start = std::chrono::steady_clock::now();
+    BeginGuestWait("cond", cvp->name.c_str());
+    const int result = cvp->Wait(mutex, nullptr);
+    EndGuestWait();
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited >= std::chrono::seconds(3)) {
+        LOG_WARNING(Lib_Kernel, "pthread_cond_wait '{}' blocked for {} ms", cvp->name,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(waited).count());
+    }
+    return result;
 }
 
 int PS4_SYSV_ABI posix_pthread_cond_timedwait(PthreadCondT* cond, PthreadMutexT* mutex,

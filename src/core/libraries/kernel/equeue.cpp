@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <chrono>
 #include <thread>
 #include <magic_enum/magic_enum.hpp>
 
@@ -8,6 +9,7 @@
 #include "common/debug.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
+#include "core/debug_state.h"
 #include "core/file_sys/fs.h"
 #include "core/libraries/kernel/equeue.h"
 #include "core/libraries/kernel/kernel.h"
@@ -480,7 +482,18 @@ int PS4_SYSV_ABI sceKernelWaitEqueue(OrbisKernelEqueue eq, OrbisKernelEvent* ev,
         return ORBIS_KERNEL_ERROR_EINVAL;
     }
 
+    const std::string equeue_name{equeue->GetName()};
+    const auto start = std::chrono::steady_clock::now();
+    BeginGuestWait("equeue", equeue_name.c_str());
     *out = equeue->WaitForEvents(ev, num, timo);
+    EndGuestWait();
+    const auto waited = std::chrono::steady_clock::now() - start;
+    if (waited >= std::chrono::seconds(3)) {
+        LOG_WARNING(Kernel_Event, "WaitEqueue '{}' blocked for {} ms num={} got={} timeout={}",
+                    equeue_name,
+                    std::chrono::duration_cast<std::chrono::milliseconds>(waited).count(), num,
+                    *out, timo ? *timo : 0);
+    }
 
     if (*out == 0) {
         return ORBIS_KERNEL_ERROR_ETIMEDOUT;

@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include "common/elf_info.h"
 #include "common/singleton.h"
@@ -1999,6 +2001,15 @@ s32 PS4_SYSV_ABI sceSystemServiceReceiveEvent(OrbisSystemServiceEvent* event) {
 
     std::lock_guard<std::mutex> lock(g_event_queue_mutex);
     if (g_event_queue.empty()) {
+        static std::atomic<u64> last_log_us{};
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        u64 previous = last_log_us.load(std::memory_order_relaxed);
+        if (static_cast<u64>(now_us) - previous >= 1'000'000 &&
+            last_log_us.compare_exchange_strong(previous, static_cast<u64>(now_us))) {
+            LOG_INFO(Lib_SystemService, "ReceiveEvent -> no event");
+        }
         return ORBIS_SYSTEM_SERVICE_ERROR_NO_EVENT;
     }
 

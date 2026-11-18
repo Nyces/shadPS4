@@ -3,9 +3,23 @@
 
 #include <imgui.h>
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstring>
+#include <mutex>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+#include <fmt/format.h>
+
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "common/native_clock.h"
 #include "common/singleton.h"
+#include "common/string_util.h"
+#include "common/thread.h"
+#include "core/aerolib/aerolib.h"
 #include "core/signals.h"
 #include "debug_state.h"
 #include "devtools/widget/common.h"
@@ -38,6 +52,271 @@ static void PauseThread(ThreadID id) {
 #endif
 }
 
+namespace {
+
+struct HleSymbolEntry {
+    u64 address;
+    const char* name;
+};
+
+// Every HLE export is registered here at startup so a sampled program counter can be named.
+std::mutex g_hle_symbols_mutex;
+std::vector<HleSymbolEntry> g_hle_symbols;
+bool g_hle_symbols_sorted = true;
+
+// Every export is registered through a small host-call thunk, so a return address that is further
+// than this from the thunk entry belongs to some other function.
+constexpr u64 MaxThunkDistance = 0x200;
+
+#if defined(_WIN32)
+struct StallSampleState {
+    u64 pc{};
+    int identical_samples{};
+    bool reported{};
+};
+
+// Only ever touched by the watchdog thread.
+std::unordered_map<ThreadID, StallSampleState> g_stall_samples;
+
+struct ThreadSample {
+    u64 pc{};
+    u64 sp{};
+};
+
+bool SampleThread(ThreadID id, ThreadSample& sample) {
+    const HANDLE handle = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, id);
+    if (handle == nullptr) {
+        return false;
+    }
+    bool ok = false;
+    if (SuspendThread(handle) != static_cast<DWORD>(-1)) {
+        CONTEXT context{};
+        context.ContextFlags = CONTEXT_CONTROL;
+        if (GetThreadContext(handle, &context)) {
+            sample.pc = context.Rip;
+            sample.sp = context.Rsp;
+            ok = true;
+        }
+        ResumeThread(handle);
+    }
+    CloseHandle(handle);
+    return ok;
+}
+#endif
+
+const HleSymbolEntry* FindHleSymbol(u64 pc) {
+    if (!g_hle_symbols_sorted) {
+        std::ranges::sort(g_hle_symbols, {}, &HleSymbolEntry::address);
+        g_hle_symbols_sorted = true;
+    }
+    const auto it = std::upper_bound(
+        g_hle_symbols.begin(), g_hle_symbols.end(), pc,
+        [](const u64 value, const HleSymbolEntry& entry) { return value < entry.address; });
+    if (it == g_hle_symbols.begin()) {
+        return nullptr;
+    }
+    return &*(it - 1);
+}
+
+#if defined(_WIN32)
+std::string DescribePc(u64 pc) {
+    if (const auto* symbol = FindHleSymbol(pc);
+        symbol != nullptr && pc - symbol->address < MaxThunkDistance) {
+        return fmt::format("HLE {} +{:#x}", symbol->name, pc - symbol->address);
+    }
+    // Name the module so a wait in a system dll can be told apart from code spinning in the
+    // emulator or in the recompiled guest.
+    HMODULE module{};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(pc), &module) != 0 &&
+        module != nullptr) {
+        wchar_t path[MAX_PATH]{};
+        if (GetModuleFileNameW(module, path, MAX_PATH) != 0) {
+            const std::wstring_view name{path};
+            const auto slash = name.find_last_of(L"\\/");
+            return fmt::format("{}+{:#x}",
+                               Common::UTF16ToUTF8(slash == std::wstring_view::npos
+                                                       ? name
+                                                       : name.substr(slash + 1)),
+                               pc - reinterpret_cast<u64>(module));
+        }
+    }
+    constexpr u64 GuestAddressLimit = 0x10'0000'0000;
+    if (pc < GuestAddressLimit) {
+        return fmt::format("guest code at {:#x}", pc);
+    }
+    return fmt::format("host code at {:#x}", pc);
+}
+
+// Scans the raw stack for return addresses that fall back into an HLE export. A thread parked in a
+// system wait keeps the whole call chain on its stack, so this names the guest APIs it went through
+// without needing a symbol server or a full unwinder.
+std::string CollectHleStackFrames(u64 sp) {
+    constexpr size_t MaxStackBytes = 16 * 1024;
+    constexpr size_t MaxFrames = 10;
+    std::vector<u8> stack(MaxStackBytes);
+    SIZE_T read = 0;
+    if (ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<LPCVOID>(sp), stack.data(),
+                          stack.size(), &read) == 0 ||
+        read < sizeof(u64)) {
+        return {};
+    }
+
+    std::string frames;
+    const char* previous = nullptr;
+    size_t count = 0;
+    for (size_t offset = 0; offset + sizeof(u64) <= read; offset += sizeof(u64)) {
+        u64 value{};
+        std::memcpy(&value, stack.data() + offset, sizeof(value));
+        const auto* symbol = FindHleSymbol(value);
+        if (symbol == nullptr || value - symbol->address >= MaxThunkDistance ||
+            symbol->name == previous) {
+            continue;
+        }
+        previous = symbol->name;
+        if (count++ > 0) {
+            frames += " <- ";
+        }
+        frames += symbol->name;
+        if (count >= MaxFrames) {
+            break;
+        }
+    }
+    return frames;
+}
+#endif
+
+} // namespace
+
+void RegisterHleFunctionSymbol(u64 host_address, const char* nid) {
+    const auto* entry = Core::AeroLib::FindByNid(nid);
+    const char* name = entry != nullptr ? entry->name : nid;
+    std::scoped_lock lock{g_hle_symbols_mutex};
+    g_hle_symbols.push_back({host_address, name});
+    g_hle_symbols_sorted = g_hle_symbols.size() == 1;
+}
+
+namespace {
+
+struct GuestWait {
+    const char* kind;
+    std::string name;
+    std::chrono::steady_clock::time_point start;
+};
+
+std::mutex g_guest_wait_mutex;
+std::unordered_map<ThreadID, GuestWait> g_guest_waits;
+thread_local int g_guest_wait_depth = 0;
+
+std::string DescribeGuestWait(ThreadID id) {
+    std::scoped_lock lock{g_guest_wait_mutex};
+    const auto it = g_guest_waits.find(id);
+    if (it == g_guest_waits.end()) {
+        return {};
+    }
+    const auto waited = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - it->second.start);
+    return fmt::format("{} '{}' for {}s", it->second.kind, it->second.name, waited.count());
+}
+
+} // namespace
+
+void BeginGuestWait(const char* kind, const char* name) {
+    if (g_guest_wait_depth++ != 0) {
+        return;
+    }
+    std::scoped_lock lock{g_guest_wait_mutex};
+    g_guest_waits.insert_or_assign(ThisThreadID(), GuestWait{kind, name != nullptr ? name : "",
+                                                             std::chrono::steady_clock::now()});
+}
+
+void EndGuestWait() {
+    if (g_guest_wait_depth > 0) {
+        --g_guest_wait_depth;
+    }
+    if (g_guest_wait_depth != 0) {
+        return;
+    }
+    std::scoped_lock lock{g_guest_wait_mutex};
+    g_guest_waits.erase(ThisThreadID());
+}
+
+void DebugStateImpl::ReportStalledGuestThreads() {
+#ifdef _WIN32
+    constexpr int SampleIntervalSec = 5;
+    constexpr int SamplesUntilStall = 3;
+
+    std::vector<std::pair<ThreadID, std::string>> threads;
+    {
+        std::scoped_lock lock{guest_threads_mutex};
+        threads.reserve(guest_threads.size() + stall_watchdog_threads.size());
+        for (const ThreadID id : guest_threads) {
+            const auto it = guest_thread_names.find(id);
+            threads.emplace_back(id,
+                                 it != guest_thread_names.end() ? it->second : std::string{"?"});
+        }
+        for (const ThreadID id : stall_watchdog_threads) {
+            const auto it = guest_thread_names.find(id);
+            threads.emplace_back(id,
+                                 it != guest_thread_names.end() ? it->second : std::string{"?"});
+        }
+    }
+
+    const ThreadID self = GetCurrentThreadId();
+    std::vector<ThreadSample> samples(threads.size());
+    for (size_t i = 0; i < threads.size(); ++i) {
+        if (threads[i].first != self) {
+            SampleThread(threads[i].first, samples[i]);
+        }
+    }
+
+    std::scoped_lock lock{g_hle_symbols_mutex};
+    for (size_t i = 0; i < threads.size(); ++i) {
+        auto& state = g_stall_samples[threads[i].first];
+        if (samples[i].pc == 0) {
+            state = {};
+            continue;
+        }
+        if (samples[i].pc == state.pc) {
+            ++state.identical_samples;
+        } else {
+            state = {.pc = samples[i].pc, .identical_samples = 1, .reported = false};
+        }
+        const bool stalled = state.identical_samples >= SamplesUntilStall;
+        if (!stalled || state.reported) {
+            continue;
+        }
+        state.reported = true;
+        const auto frames = CollectHleStackFrames(samples[i].sp);
+        const auto wait = DescribeGuestWait(threads[i].first);
+        LOG_WARNING(Kernel, "Guest thread '{}' (tid {}) has not moved for {}s, at {}{}{}",
+                    threads[i].second, threads[i].first,
+                    state.identical_samples * SampleIntervalSec, DescribePc(samples[i].pc),
+                    wait.empty() ? "" : "; blocked in ", wait);
+        if (!frames.empty()) {
+            LOG_WARNING(Kernel, "  call chain: {}", frames);
+        }
+    }
+#endif
+}
+
+void StartGuestStallWatchdog() {
+#ifdef _WIN32
+    static std::atomic_bool started{false};
+    if (started.exchange(true)) {
+        return;
+    }
+    std::thread([] {
+        Common::SetCurrentThreadName("StallWatchdog");
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+            DebugState.ReportStalledGuestThreads();
+        }
+    }).detach();
+#endif
+}
+
 static void ResumeThread(ThreadID id) {
 #ifdef _WIN32
     auto handle = OpenThread(THREAD_SUSPEND_RESUME, FALSE, id);
@@ -52,12 +331,21 @@ void DebugStateImpl::AddCurrentThreadToGuestList() {
     std::lock_guard lock{guest_threads_mutex};
     const ThreadID id = ThisThreadID();
     guest_threads.push_back(id);
+    guest_thread_names.insert_or_assign(id, Common::GetCurrentThreadName());
 }
 
 void DebugStateImpl::RemoveCurrentThreadFromGuestList() {
     std::lock_guard lock{guest_threads_mutex};
     const ThreadID id = ThisThreadID();
     std::erase_if(guest_threads, [&](const ThreadID& v) { return v == id; });
+    guest_thread_names.erase(id);
+}
+
+void DebugStateImpl::RegisterStallWatchdogThread() {
+    std::lock_guard lock{guest_threads_mutex};
+    const ThreadID id = ThisThreadID();
+    stall_watchdog_threads.push_back(id);
+    guest_thread_names.insert_or_assign(id, Common::GetCurrentThreadName());
 }
 
 void DebugStateImpl::PauseGuestThreads() {

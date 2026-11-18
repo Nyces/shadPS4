@@ -5,6 +5,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <stop_token>
+#include <string>
 #include <thread>
 #include <fmt/format.h>
 #include <magic_enum/magic_enum.hpp>
@@ -12,6 +13,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/thread.h"
+#include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/audio/audioout.h"
 #include "core/libraries/audio/audioout_backend.h"
@@ -572,7 +574,10 @@ s32 PS4_SYSV_ABI sceAudioOutOutput(s32 handle, void* ptr) {
     s32 samples_sent = 0;
     {
         std::unique_lock lock{port->mutex};
+        const std::string wait_name = "port " + std::to_string(port_id);
+        BeginGuestWait("audio output", wait_name.c_str());
         port->output_cv.wait(lock, [&] { return !port->output_ready || port->closing; });
+        EndGuestWait();
 
         if (port->closing) {
             LOG_DEBUG(Lib_AudioOut, "Port {} closed while waiting for drain", port_id);

@@ -1,9 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <chrono>
+
 #include "common/assert.h"
 #include "common/elf_info.h"
 #include "common/logging/log.h"
+#include "core/debug_state.h"
 #include "core/emulator_settings.h"
 #include "core/libraries/libs.h"
 #include "core/libraries/system/userservice.h"
@@ -18,6 +22,19 @@ extern std::unique_ptr<Vulkan::Presenter> presenter;
 namespace Libraries::VideoOut {
 
 static std::unique_ptr<VideoOutDriver> driver;
+
+// The game polls the video out state every frame, so log at most one line per second to see what a
+// waiting thread is still doing without flooding the log.
+static bool LogOncePerSecond(std::atomic<u64>& last_log_us) {
+    const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    u64 previous = last_log_us.load(std::memory_order_relaxed);
+    if (static_cast<u64>(now_us) - previous < 1'000'000) {
+        return false;
+    }
+    return last_log_us.compare_exchange_strong(previous, static_cast<u64>(now_us));
+}
 
 void PS4_SYSV_ABI sceVideoOutSetBufferAttribute(BufferAttribute* attribute, PixelFormat pixelFormat,
                                                 u32 tilingMode, u32 aspectRatio, u32 width,
@@ -175,6 +192,12 @@ s32 PS4_SYSV_ABI sceVideoOutSubmitFlip(s32 handle, s32 bufferIndex, s32 flipMode
 
     LOG_DEBUG(Lib_VideoOut, "bufferIndex = {}, flipMode = {}, flipArg = {}", bufferIndex, flipMode,
               flipArg);
+    {
+        static std::atomic<u64> last_log_us{};
+        if (LogOncePerSecond(last_log_us)) {
+            LOG_INFO(Lib_VideoOut, "SubmitFlip bufferIndex={} flipArg={}", bufferIndex, flipArg);
+        }
+    }
 
     if (!driver->SubmitFlip(port, bufferIndex, flipArg)) {
         LOG_ERROR(Lib_VideoOut, "Flip queue is full");
@@ -256,6 +279,18 @@ s32 PS4_SYSV_ABI sceVideoOutGetFlipStatus(s32 handle, FlipStatus* status) {
     {
         std::unique_lock lock{port->port_mutex};
         *status = port->flip_status;
+    }
+
+    {
+        static std::atomic<u64> last_log_us{};
+        if (LogOncePerSecond(last_log_us)) {
+            LOG_INFO(Lib_VideoOut,
+                     "GetFlipStatus count={} flipArg={} gcQueueNum={} flipPendingNum={} "
+                     "currentBuffer={} draws={:.0f} dispatches={:.0f}",
+                     status->count, status->flip_arg, status->gc_queue_num,
+                     status->flip_pending_num, status->current_buffer, DebugState.GetDrawCallsAvg(),
+                     DebugState.GetDispatchesAvg());
+        }
     }
 
     LOG_TRACE(Lib_VideoOut,
@@ -379,7 +414,15 @@ s32 PS4_SYSV_ABI sceVideoOutWaitVblank(s32 handle) {
 
     std::unique_lock lock{port->vo_mutex};
     const auto prev_counter = port->vblank_status.count;
+    BeginGuestWait("vblank", "video out");
     port->vblank_cv.wait(lock, [&]() { return prev_counter != port->vblank_status.count; });
+    EndGuestWait();
+    {
+        static std::atomic<u64> last_log_us{};
+        if (LogOncePerSecond(last_log_us)) {
+            LOG_INFO(Lib_VideoOut, "WaitVblank count={}", port->vblank_status.count);
+        }
+    }
     return ORBIS_OK;
 }
 

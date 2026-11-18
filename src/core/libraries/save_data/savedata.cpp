@@ -1,9 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <atomic>
+#include <chrono>
 #include <cstring>
+#include <mutex>
+#include <set>
 #include <span>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #include <magic_enum/magic_enum.hpp>
@@ -14,6 +19,7 @@
 #include "common/enum.h"
 #include "common/logging/log.h"
 #include "common/path_util.h"
+#include "common/scope_exit.h"
 #include "common/string_util.h"
 #include "core/emulator_settings.h"
 #include "core/file_format/psf.h"
@@ -310,10 +316,52 @@ struct OrbisSaveDataEvent {
     std::array<u8, 40> _reserved;
 };
 
+static std::recursive_mutex g_event_callback_mutex;
+static OrbisSaveDataEventCallback g_event_callback{};
+static void* g_event_userdata{};
+static thread_local bool g_in_backup_callback = false;
+
+void DispatchBackupEvent(const Backup::BackupRequest& request) {
+    std::scoped_lock lock{g_event_callback_mutex};
+    if (!g_event_callback) {
+        return;
+    }
+    OrbisSaveDataEvent event{};
+    event.type = request.origin;
+    event.errorCode = request.error_code;
+    event.userId = request.user_id;
+    event.titleId.data.FromString(request.title_id);
+    event.dirName.data.FromString(request.dir_name);
+    LOG_INFO(Lib_SaveData, "Delivering backup event: type={}, error={}, dir={}",
+             static_cast<u32>(event.type), event.errorCode, request.dir_name);
+    const bool was_in_callback = g_in_backup_callback;
+    g_in_backup_callback = true;
+    SCOPE_EXIT {
+        g_in_backup_callback = was_in_callback;
+    };
+    g_event_callback(&event, g_event_userdata);
+}
+
 static bool g_initialized = false;
 static std::string g_game_serial;
 static u32 g_fw_ver;
 static std::array<std::optional<SaveInstance>, 16> g_mount_slots;
+
+// Games read and write their save memory in many small chunks. Only the first access of each
+// distinct offset/size pair is logged, otherwise the useful information drowns in repeats.
+enum class SaveMemoryAccessKind : u32 { Read = 0, Write = 1 };
+
+static void LogSaveMemoryAccess(SaveMemoryAccessKind kind, u32 slot_id, s64 offset, size_t size) {
+    static std::mutex mtx;
+    static std::set<std::tuple<u32, u64, size_t, u32>> seen;
+    std::scoped_lock lock{mtx};
+    if (!seen.emplace(slot_id, static_cast<u64>(offset), size, static_cast<u32>(kind)).second) {
+        return;
+    }
+    LOG_INFO(Lib_SaveData, "Save memory {} slot {} offset={:#x} size={:#x}",
+             kind == SaveMemoryAccessKind::Read ? "read" : "write", slot_id,
+             static_cast<u64>(offset), size);
+}
 
 static void initialize() {
     g_initialized = true;
@@ -382,6 +430,8 @@ static Error saveDataMount(const OrbisSaveDataMount2* mount_info,
         const auto save_path =
             SaveInstance::MakeDirSavePath(mount_info->userId, title_id, mount_info->dirName->data);
         if (Backup::IsBackupExecutingFor(save_path) && g_fw_ver) {
+            LOG_INFO(Lib_SaveData, "Mount blocked, backup running: {}",
+                     mount_info->dirName->data.to_view());
             return Error::BACKUP_BUSY;
         }
     }
@@ -400,6 +450,8 @@ static Error saveDataMount(const OrbisSaveDataMount2* mount_info,
         True(mount_mode & OrbisSaveDataMountMode::DESTRUCT_OFF) || g_fw_ver < ElfInfo::FW_160;
 
     const std::string_view dir_name{mount_info->dirName->data};
+    LOG_INFO(Lib_SaveData, "Mount dir={} user={} mode={:#x}", dir_name, mount_info->userId,
+             static_cast<u32>(mount_info->mountMode));
 
     // find available mount point
     int slot_num = -1;
@@ -493,6 +545,7 @@ static Error Umount(const OrbisSaveDataMountPoint* mountPoint, bool call_backup 
     LOG_DEBUG(Lib_SaveData, "Umount mountPoint:{}", mountPoint->data.to_view());
 
     std::string mount_point_str = mountPoint->data.to_string();
+    LOG_INFO(Lib_SaveData, "Umount mountPoint={} backup={}", mount_point_str, call_backup);
 
     for (auto& instance : g_mount_slots) {
         if (instance.has_value()) {
@@ -787,7 +840,9 @@ Error PS4_SYSV_ABI sceSaveDataDirNameSearch(const OrbisSaveDataDirNameSearchCond
         LOG_INFO(Lib_SaveData, "called with invalid parameter");
         return Error::PARAMETER;
     }
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "DirNameSearch user={} dirName={} key={}", cond->userId,
+             cond->dirName != nullptr ? cond->dirName->data.to_view() : std::string_view{},
+             magic_enum::enum_name(cond->key));
     const std::string_view title_id{cond->titleId == nullptr
                                         ? std::string_view{g_game_serial}
                                         : std::string_view{cond->titleId->data}};
@@ -970,11 +1025,22 @@ Error PS4_SYSV_ABI sceSaveDataGetEventResult(const OrbisSaveDataEventParam*,
 
     auto last_event = Backup::PopLastEvent();
     if (!last_event.has_value()) {
+        // A game that waits for an asynchronous save or backup polls this once per frame, so a
+        // single sample per second shows whether the poll is what keeps it waiting.
+        static std::atomic<u64> last_log_us{};
+        const auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        u64 previous = last_log_us.load(std::memory_order_relaxed);
+        if (static_cast<u64>(now_us) - previous >= 1'000'000 &&
+            last_log_us.compare_exchange_strong(previous, static_cast<u64>(now_us))) {
+            LOG_INFO(Lib_SaveData, "GetEventResult -> no event");
+        }
         return Error::NOT_FOUND;
     }
 
     event->type = last_event->origin;
-    event->errorCode = 0;
+    event->errorCode = last_event->error_code;
     event->userId = last_event->user_id;
     event->titleId.data.FromString(last_event->title_id);
     event->dirName.data.FromString(last_event->dir_name);
@@ -1027,7 +1093,8 @@ Error PS4_SYSV_ABI sceSaveDataGetParam(const OrbisSaveDataMountPoint* mountPoint
         LOG_INFO(Lib_SaveData, "called with invalid parameter");
         return Error::PARAMETER;
     }
-    LOG_DEBUG(Lib_SaveData, "called: paramType = {}", magic_enum::enum_name(paramType));
+    LOG_INFO(Lib_SaveData, "GetParam mountPoint={} paramType={}", mountPoint->data.to_view(),
+             magic_enum::enum_name(paramType));
     const PSF* param_sfo = nullptr;
 
     const std::string_view mount_point_str{mountPoint->data};
@@ -1149,6 +1216,7 @@ Error PS4_SYSV_ABI sceSaveDataGetSaveDataMemory2(OrbisSaveDataMemoryGet2* getPar
     LOG_DEBUG(Lib_SaveData, "called");
     auto data = getParam->data;
     if (data != nullptr) {
+        LogSaveMemoryAccess(SaveMemoryAccessKind::Read, slot_id, data->offset, data->bufSize);
         SaveMemory::ReadMemory(slot_id, data->buf, data->bufSize, data->offset);
     }
     auto param = getParam->param;
@@ -1192,19 +1260,19 @@ int PS4_SYSV_ABI sceSaveDataGetUpdatedDataCount() {
 }
 
 Error PS4_SYSV_ABI sceSaveDataInitialize(void*) {
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "called");
     initialize();
     return Error::OK;
 }
 
 Error PS4_SYSV_ABI sceSaveDataInitialize2(void*) {
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "called");
     initialize();
     return Error::OK;
 }
 
 Error PS4_SYSV_ABI sceSaveDataInitialize3(void*) {
-    LOG_DEBUG(Lib_SaveData, "called");
+    LOG_INFO(Lib_SaveData, "called");
     initialize();
     return Error::OK;
 }
@@ -1314,9 +1382,19 @@ int PS4_SYSV_ABI sceSaveDataRebuildDatabase() {
     return ORBIS_OK;
 }
 
-int PS4_SYSV_ABI sceSaveDataRegisterEventCallback() {
-    LOG_ERROR(Lib_SaveData, "(STUBBED) called");
-    return ORBIS_OK;
+Error PS4_SYSV_ABI sceSaveDataRegisterEventCallback(OrbisSaveDataEventCallback callback,
+                                                    void* userdata) {
+    if (!g_initialized) {
+        return setNotInitializedError();
+    }
+    if (!callback) {
+        return Error::PARAMETER;
+    }
+    std::scoped_lock lock{g_event_callback_mutex};
+    g_event_callback = callback;
+    g_event_userdata = userdata;
+    LOG_INFO(Lib_SaveData, "Registered save event callback");
+    return Error::OK;
 }
 
 Error PS4_SYSV_ABI sceSaveDataRestoreBackupData(const OrbisSaveDataRestoreBackupData* restore) {
@@ -1518,6 +1596,8 @@ Error PS4_SYSV_ABI sceSaveDataSetSaveDataMemory2(const OrbisSaveDataMemorySet2* 
     auto data = setParam->data;
     if (data != nullptr) {
         for (int i = 0; i < data_num; i++) {
+            LogSaveMemoryAccess(SaveMemoryAccessKind::Write, slot_id, data[i].offset,
+                                data[i].bufSize);
             SaveMemory::WriteMemory(slot_id, data[i].buf, data[i].bufSize, data[i].offset);
         }
     }
@@ -1570,12 +1650,13 @@ Error PS4_SYSV_ABI sceSaveDataSetupSaveDataMemory2(const OrbisSaveDataMemorySetu
         LOG_INFO(Lib_SaveData, "called with invalid parameter");
         return Error::PARAMETER;
     }
-    LOG_DEBUG(Lib_SaveData, "called");
 
     u32 slot_id = 0;
     if (g_fw_ver > ElfInfo::FW_500) {
         slot_id = setupParam->slotId;
     }
+    LOG_INFO(Lib_SaveData, "SetupSaveDataMemory user={} slot={} size={:#x}", setupParam->userId,
+             slot_id, setupParam->memorySize);
 
     const auto& save_path = SaveMemory::GetSavePath(setupParam->userId, slot_id, g_game_serial);
     for (const auto& instance : g_mount_slots) {
@@ -1587,6 +1668,8 @@ Error PS4_SYSV_ABI sceSaveDataSetupSaveDataMemory2(const OrbisSaveDataMemorySetu
     try {
         size_t existed_size = SaveMemory::SetupSaveMemory(setupParam->userId, slot_id,
                                                           g_game_serial, setupParam->memorySize);
+        LOG_INFO(Lib_SaveData, "SetupSaveDataMemory slot {} existedSize={:#x} created={}", slot_id,
+                 existed_size, existed_size == 0);
         if (existed_size == 0) { // Just created
             if (g_fw_ver >= ElfInfo::FW_450 && setupParam->initParam != nullptr) {
                 auto& sfo = SaveMemory::GetParamSFO(slot_id);
@@ -1657,14 +1740,19 @@ Error PS4_SYSV_ABI sceSaveDataSyncSaveDataMemory(OrbisSaveDataMemorySync* syncPa
 
     SaveMemory::PersistMemory(slot_id);
     const auto& save_path = SaveMemory::GetSaveDir(slot_id);
-    Backup::NewRequest(syncParam->userId, g_game_serial, save_path,
-                       OrbisSaveDataEventType::SAVE_DATA_MEMORY_SYNC);
+    const bool queued = Backup::NewRequest(syncParam->userId, g_game_serial, save_path,
+                                           OrbisSaveDataEventType::SAVE_DATA_MEMORY_SYNC);
+    LOG_INFO(Lib_SaveData, "Save memory sync slot {} queued backup={}", slot_id, queued);
 
     return Error::OK;
 }
 
 Error PS4_SYSV_ABI sceSaveDataTerminate() {
     LOG_DEBUG(Lib_SaveData, "called");
+    // Termination joins the backup worker; its callback cannot join its own thread.
+    if (g_in_backup_callback) {
+        return Error::BUSY;
+    }
     if (!g_initialized) {
         return setNotInitializedError();
     }
@@ -1677,6 +1765,7 @@ Error PS4_SYSV_ABI sceSaveDataTerminate() {
             instance.reset();
         }
     }
+    sceSaveDataUnregisterEventCallback();
     g_initialized = false;
     Backup::StopThread();
     return Error::OK;
@@ -1717,9 +1806,11 @@ Error PS4_SYSV_ABI sceSaveDataUmountWithBackup(const OrbisSaveDataMountPoint* mo
     return Umount(mountPoint, true);
 }
 
-int PS4_SYSV_ABI sceSaveDataUnregisterEventCallback() {
-    LOG_ERROR(Lib_SaveData, "(STUBBED) called");
-    return ORBIS_OK;
+Error PS4_SYSV_ABI sceSaveDataUnregisterEventCallback() {
+    std::scoped_lock lock{g_event_callback_mutex};
+    g_event_callback = nullptr;
+    g_event_userdata = nullptr;
+    return Error::OK;
 }
 
 int PS4_SYSV_ABI sceSaveDataUpload() {
