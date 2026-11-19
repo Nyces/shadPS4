@@ -93,15 +93,6 @@ public:
 
 private:
     void LogTargetMap(VideoCore::Image& image, u32 which, u32 sample);
-    // Scale the current draw's clip space about the top-left corner of the frame. The stage
-    // glass plane is laid out in the game's original window pixels, so every one of its window
-    // coordinates has to be multiplied by the presentation scale. Its own size follows the
-    // camera and is thus not the thing that is wrong: only the conversion to clip space is,
-    // and it is half of what the enlarged target needs. Every draw is sorted into one of eight
-    // buckets by its vertex program, and each bucket receives a different factor, so a single
-    // screenshot tells which bucket holds the plane.
-    mutable float probe_viewport_scale{1.0f};
-    void UpdateProbeScale(const GraphicsPipeline* pipeline, bool indirect);
     void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
     float PresentationScale() const;
     void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,
@@ -113,7 +104,7 @@ private:
     void EliminateFastClear();
 
     void UpdateDynamicState(const GraphicsPipeline* pipeline, bool is_indexed) const;
-    void UpdateViewportScissorState() const;
+    void UpdateViewportScissorState(const GraphicsPipeline* pipeline) const;
     void UpdateDepthStencilState() const;
     void UpdatePrimitiveState(bool is_indexed) const;
     void UpdateRasterizationState() const;

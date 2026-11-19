@@ -5,6 +5,7 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -750,52 +751,6 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
-// TEMPORARY EXPERIMENT: the glass plane of the live stage is laid out in the game's original
-// window pixels. In the native capture it covers exactly x=0..1920 and y=0..1080 of the
-// 3840x2160 frame, i.e. the corner quadrant the game's own window sizes, and in another capture
-// it covered 61% of the width while its height barely moved: its size follows the camera, so the
-// size is not what is wrong, the conversion to clip space is, and it is half of what the enlarged
-// target needs. The draws that could carry it are not the small ones, which were probed already
-// and changed nothing, so sort every draw of the scene and of its composition into eight buckets
-// by its vertex program and give each bucket its own factor. The plane's width on the screenshot
-// then names the bucket, without guessing which of the dozens of passes it is.
-void Rasterizer::UpdateProbeScale(const GraphicsPipeline* pipeline, bool indirect) {
-    probe_viewport_scale = 1.0f;
-    const auto& regs = liverpool->regs;
-    const VAddr cb0 = regs.color_buffers[0].Address();
-    if (cb0 != 0x20acc0000ull && cb0 != 0x207140000ull && cb0 != 0x208240000ull &&
-        cb0 != 0x20f0c0000ull && cb0 != 0x209340000ull) {
-        return;
-    }
-    const auto stages = pipeline->GetStages();
-    const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
-        const u32 index = u32(s);
-        return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
-    };
-    const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
-    const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
-    // The composition copies span the frame on their own and must keep doing so, or the whole
-    // frame shrinks into the corner and nothing can be told apart anymore.
-    if (vs_hash == 0x83b353faull) {
-        return;
-    }
-    static constexpr std::array<float, 8> kScales = {0.9f, 0.8f, 0.7f, 0.6f,
-                                                     0.5f, 0.4f, 0.3f, 0.2f};
-    const u32 bucket = u32(vs_hash & 7ull);
-    probe_viewport_scale = kScales[bucket];
-    static std::unordered_set<u64> logged_probe;
-    const u64 key = (u64(cb0) << 24) ^ (vs_hash << 4) ^ (fs_hash & 0xFull);
-    if (logged_probe.insert(key).second) {
-        LOG_INFO(Render_Vulkan,
-                 "Probe bucket: cb0={:#x} vs={:#x} fs={:#x} bucket={} scale={} prim={} "
-                 "numIndices={} inst={} indirect={} vp=({},{},{},{})",
-                 cb0, vs_hash, fs_hash, bucket, probe_viewport_scale,
-                 static_cast<u32>(regs.primitive_type), regs.num_indices,
-                 regs.num_instances.NumInstances(), indirect, regs.viewports[0].xoffset,
-                 regs.viewports[0].xscale, regs.viewports[0].yoffset, regs.viewports[0].yscale);
-    }
-}
-
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
@@ -810,8 +765,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
-
-    UpdateProbeScale(pipeline, false);
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
@@ -898,17 +851,32 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                 AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y);
             const bool cb0_bound = static_cast<bool>(cb_descs[0].first);
             const auto& cb0_size = cb_descs[0].second.info.size;
+            // List the extent of everything this pass samples. A layer that is composited from a
+            // source still at the game's own window size reads a target half the destination in
+            // both axes, which is the same picture as a pass whose geometry only covers a quarter,
+            // so the two can only be told apart by what the pass reads and what it writes.
+            std::string reads;
+            for (const auto& binding : image_bindings) {
+                const auto& desc = binding.second;
+                if (reads.size() > 200) {
+                    reads += " ...";
+                    break;
+                }
+                reads += fmt::format("{}{:#x}:{}x{}", reads.empty() ? "" : " ",
+                                     desc.info.guest_address, desc.info.size.width,
+                                     desc.info.size.height);
+            }
             LOG_INFO(Render_Vulkan,
                      "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
                      "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
-                     "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}",
+                     "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}, reads=[{}]",
                      liverpool->regs.color_buffers[0].Address(), cb0_bound ? cb0_size.width : 0u,
                      cb0_bound ? cb0_size.height : 0u,
                      static_cast<u32>(liverpool->regs.primitive_type),
                      liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, bound_inputs,
                      declared_inputs, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, scsr_w, scsr_h,
                      liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
-                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()));
+                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()), reads);
         }
         // Count how often each variant runs. Two variants of one layer can share a shader pair
         // and differ only in layout, and a session cannot tell that apart from a camera mode
@@ -1301,10 +1269,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
-    // Indirect batches carry their own counts, which is why the earlier probe on the small
-    // direct draws never reached them.
-    UpdateProbeScale(pipeline, true);
-
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
@@ -1517,14 +1481,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                          rt_fit_width, rt_fit_height, push_data.xoffset, push_data.yoffset,
                          push_data.xscale, push_data.yscale);
             }
-        }
-        // TEMPORARY EXPERIMENT: a clip-disabled pass keeps its window coordinates in the push
-        // data conversion, so that is the only place the probe can scale them.
-        if (probe_viewport_scale != 1.0f) {
-            push_data.xoffset *= probe_viewport_scale;
-            push_data.xscale *= probe_viewport_scale;
-            push_data.yoffset *= probe_viewport_scale;
-            push_data.yscale *= probe_viewport_scale;
         }
     }
     for (const auto* stage : pipeline->GetStages()) {
@@ -2634,7 +2590,7 @@ void Rasterizer::UnmapMemory(VAddr addr, u64 size) {
 }
 
 void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool is_indexed) const {
-    UpdateViewportScissorState();
+    UpdateViewportScissorState(pipeline);
     UpdateDepthStencilState();
     UpdatePrimitiveState(is_indexed);
     UpdateRasterizationState();
@@ -2644,7 +2600,7 @@ void Rasterizer::UpdateDynamicState(const GraphicsPipeline* pipeline, const bool
     dynamic_state.Commit(instance, scheduler.CommandBuffer());
 }
 
-void Rasterizer::UpdateViewportScissorState() const {
+void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) const {
     const auto& regs = liverpool->regs;
 
     const auto combined_scissor_value_tl = [](s16 scr, s16 win, s16 gen, s16 win_offset) {
@@ -2818,13 +2774,56 @@ void Rasterizer::UpdateViewportScissorState() const {
                 const bool overshoots_y =
                     rt_fit_height > 0 &&
                     std::abs(viewport.height) * rt_fit_y > float(rt_fit_height) * 1.001f;
-                if (!converted_x && !overshoots_x) {
+                // A viewport that ends up exactly half the enlarged target is not a deliberate
+                // fraction of it: it is the shape the game's own window leaves behind. The scissor
+                // test above cannot see such a pass when its scissor is that same window, since
+                // then the viewport already matches window times ratio, and the layer is left
+                // covering the top-left quarter of the frame with its full content inside it,
+                // which is what the stage glass behind the character does. Treat an exactly half
+                // extent as unconverted and take the ratio, while an axis that would overshoot the
+                // target is still left alone.
+                const bool half_x =
+                    rt_fit_width > 0 &&
+                    std::abs(std::abs(viewport.width) * 2.0f - float(rt_fit_width)) <=
+                        float(rt_fit_width) * 0.02f;
+                const bool half_y =
+                    rt_fit_height > 0 &&
+                    std::abs(std::abs(viewport.height) * 2.0f - float(rt_fit_height)) <=
+                        float(rt_fit_height) * 0.02f;
+                if ((!converted_x && !overshoots_x) || half_x) {
                     viewport.x *= rt_fit_x;
                     viewport.width *= rt_fit_x;
                 }
-                if (!converted_y && !overshoots_y) {
+                if ((!converted_y && !overshoots_y) || half_y) {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
+                }
+                // Report only the passes this rule changed, i.e. those the scissor test had
+                // already accepted as converted while their extent is still half the target.
+                if ((half_x && converted_x) || (half_y && converted_y)) {
+                    static std::unordered_set<u64> logged_half;
+                    const auto stage_hash = [pipeline](Shader::LogicalStage s) -> u64 {
+                        if (!pipeline) {
+                            return 0ull;
+                        }
+                        const auto stages = pipeline->GetStages();
+                        const u32 index = u32(s);
+                        return index < stages.size() && stages[index] ? stages[index]->pgm_hash
+                                                                     : 0ull;
+                    };
+                    const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
+                    const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
+                    const u64 k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
+                                  (vs_hash << 8) ^ (fs_hash & 0xFFull);
+                    if (logged_half.insert(k).second) {
+                        LOG_INFO(Render_Vulkan,
+                                 "Half viewport: cb0={:#x}, vs={:#x}, fs={:#x}, "
+                                 "rawVP=({},{},{},{}), finalVP=({},{} {}x{}), target={}x{}",
+                                 liverpool->regs.color_buffers[0].Address(), vs_hash, fs_hash,
+                                 vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, viewport.x,
+                                 viewport.y, viewport.width, viewport.height, rt_fit_width,
+                                 rt_fit_height);
+                    }
                 }
                 // Report the raw register state of every distinct enlarged-target
                 // clip-enabled pass so the viewport values handed to Vulkan can be
@@ -2845,19 +2844,6 @@ void Rasterizer::UpdateViewportScissorState() const {
                              converted_x, converted_y);
                 }
             }
-        }
-
-        // TEMPORARY EXPERIMENT: multiplying the offset and the extent of a clip-enabled pass by
-        // the same factor multiplies its window coordinates by that factor, so it enlarges the
-        // geometry about the top-left corner of the frame. That is exactly the conversion the
-        // glass plane needs: its own vertices describe the game's original window, and every
-        // one of them has to reach twice as far on the enlarged target while its origin stays
-        // at the corner.
-        if (probe_viewport_scale != 1.0f && !regs.IsClipDisabled()) {
-            viewport.x *= probe_viewport_scale;
-            viewport.width *= probe_viewport_scale;
-            viewport.y *= probe_viewport_scale;
-            viewport.height *= probe_viewport_scale;
         }
 
         viewports.push_back(viewport);
@@ -2909,18 +2895,30 @@ void Rasterizer::UpdateViewportScissorState() const {
             // scene both arrive with the same registers, and keying on the extent alone
             // reported only whichever came first and hid the other completely.
             static std::unordered_set<u64> logged_vp;
+            const auto stage_hash = [pipeline](Shader::LogicalStage s) -> u64 {
+                if (!pipeline) {
+                    return 0ull;
+                }
+                const auto stages = pipeline->GetStages();
+                const u32 index = u32(s);
+                return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
+            };
+            const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
+            const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
             const u64 k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 32) ^
                           (u64(std::bit_cast<u32>(viewport.width)) << 12) ^
                           (u64(std::bit_cast<u32>(viewport.height)) << 6) ^
                           (u64(static_cast<u32>(regs.primitive_type)) << 3) ^
                           (u64(vp_scsr.GetWidth()) << 1) ^ (u64(rt_fit_width) << 34) ^
-                          (regs.IsClipDisabled() ? 2u : 0u) ^ (presents_upscaled ? 1u : 0u);
+                          (regs.IsClipDisabled() ? 2u : 0u) ^ (presents_upscaled ? 1u : 0u) ^
+                          (vs_hash << 44);
             if (logged_vp.insert(k).second) {
                 LOG_INFO(Render_Vulkan,
-                         "Final viewport: cb0={:#x}, prim={}, clipDisabled={}, vp=({},{} "
-                         "{}x{}), scissor=({},{} {}x{}), voFit={}x{}, rtFit={}x{}, "
-                         "rtFitExtent={}x{}, outputUpscaled={}, presentsUpscaled={}",
-                         liverpool->regs.color_buffers[0].Address(),
+                         "Final viewport: cb0={:#x}, vs={:#x}, fs={:#x}, prim={}, "
+                         "clipDisabled={}, vp=({},{} {}x{}), scissor=({},{} {}x{}), "
+                         "voFit={}x{}, rtFit={}x{}, rtFitExtent={}x{}, outputUpscaled={}, "
+                         "presentsUpscaled={}",
+                         liverpool->regs.color_buffers[0].Address(), vs_hash, fs_hash,
                          static_cast<u32>(regs.primitive_type), regs.IsClipDisabled(), viewport.x,
                          viewport.y, viewport.width, viewport.height, vp_scsr.top_left_x,
                          vp_scsr.top_left_y, vp_scsr.GetWidth(), vp_scsr.GetHeight(), vo_fit_x,
