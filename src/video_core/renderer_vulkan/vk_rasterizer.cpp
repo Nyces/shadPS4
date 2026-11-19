@@ -1372,20 +1372,24 @@ void Rasterizer::UpdateViewportScissorState() const {
         // laid out in the enlarged space as well, otherwise its content only covers a quarter of
         // the region the composite samples and every moving bar or gauge is drawn at the wrong size
         // and place.
+        // The pass is laid out in the native space unless its viewport already covers more than
+        // 1920x1080. A pass that is already 4K laid out that renders into an enlarged image must
+        // not be scaled again, otherwise its content ends up twice as big as it should be.
+        const bool native_space_layout = vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f;
         bool guest_hd_space = false;
         u32 target_width = 0;
         for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
-            if (cb_image_scaled[cb] != 0) {
+            if (cb_image_scaled[cb] != 0 && native_space_layout) {
                 guest_hd_space = true;
             }
             target_width = std::max(target_width, cb_image_width[cb]);
         }
-        if (db_image_scaled != 0) {
+        if (db_image_scaled != 0 && native_space_layout) {
             guest_hd_space = true;
         }
         target_width = std::max(target_width, db_image_width);
         if (!guest_hd_space && !regs.IsClipDisabled() && target_width >= 3840 &&
-            vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f) {
+            native_space_layout) {
             guest_hd_space = true;
         }
         const f32 scale_f = guest_hd_space ? resolution_scale_f : 1.0f;
