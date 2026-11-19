@@ -751,11 +751,12 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
-// TEMPORARY EXPERIMENT: the layer's own width changes with the camera and comes back, so it is
-// geometry rebuilt every frame and not a fixed screen quad; the static overlays were the wrong
-// guess. It is drawn after the light sticks and carries five inputs, which is the shape of the
-// backdrop that takes a light and a shadow: it is the pass that follows the light sticks in the
-// frame, so scale only that one and leave everything else untouched.
+// TEMPORARY EXPERIMENT: every pass of the scene writes its colour with one and zero, i.e. it
+// replaces the target, except three. One multiplies the target by its own colour, and that is the
+// only blend that can turn a transparent part of a layer into black and also erase the light
+// sticks drawn before it: the target is multiplied by zero there, whatever the alpha says. The
+// other two add light and blend normally, so give the three distinct factors and leave the rest
+// untouched, which is what the previous probe failed to do.
 void Rasterizer::UpdateProbeScale(const GraphicsPipeline* pipeline) {
     probe_scale = 1.0f;
     const auto& regs = liverpool->regs;
@@ -770,8 +771,12 @@ void Rasterizer::UpdateProbeScale(const GraphicsPipeline* pipeline) {
     };
     const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
     const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
-    if (vs_hash == 0xd8915e1ull) {
+    if (vs_hash == 0x5bc81dabull) {
         probe_scale = 2.0f;
+    } else if (vs_hash == 0x6cdd330aull) {
+        probe_scale = 0.5f;
+    } else if (fs_hash == 0xe9824e60ull) {
+        probe_scale = 1.5f;
     }
     if (probe_scale != 1.0f) {
         static std::unordered_set<u64> logged_probe;
