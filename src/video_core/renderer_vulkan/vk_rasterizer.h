@@ -152,6 +152,14 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
+    // Host extent of the image that is actually bound as the render target. A pass can describe a
+    // target with a smaller extent than the cached image that ends up being used for it (a strip of
+    // a full screen effect buffer for instance), so the layout of the image is what decides whether
+    // the pass has to be laid out in the enlarged space.
+    std::array<u8, AmdGpu::NUM_COLOR_BUFFERS> cb_image_scaled{};
+    std::array<u32, AmdGpu::NUM_COLOR_BUFFERS> cb_image_width{};
+    u8 db_image_scaled{};
+    u32 db_image_width{};
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;

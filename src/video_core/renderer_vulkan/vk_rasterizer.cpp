@@ -112,12 +112,16 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
 
     const bool skip_cb_binding =
         regs.color_control.mode == AmdGpu::ColorControl::OperationMode::Disable;
+    cb_image_scaled.fill(0);
+    cb_image_width.fill(0);
     for (s32 cb = 0; cb < std::bit_width(key.mrt_mask); ++cb) {
         auto& [image_id, desc] = cb_descs[cb];
         const auto& col_buf = regs.color_buffers[cb];
         const u32 target_mask = regs.color_target_mask.GetMask(cb);
         if (skip_cb_binding || !col_buf || !target_mask || (key.mrt_mask & (1 << cb)) == 0) {
             image_id = {};
+            cb_image_scaled[cb] = 0;
+            cb_image_width[cb] = 0;
             continue;
         }
         const auto& hint = liverpool->last_cb_extent[cb];
@@ -125,6 +129,8 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+        cb_image_scaled[cb] = image.info.props.is_scaled;
+        cb_image_width[cb] = image.info.size.width;
     }
 
     if ((regs.depth_control.depth_enable && regs.depth_buffer.DepthValid()) ||
@@ -137,8 +143,12 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+        db_image_scaled = image.info.props.is_scaled;
+        db_image_width = image.info.size.width;
     } else {
         db_desc.first = {};
+        db_image_scaled = 0;
+        db_image_width = 0;
     }
 }
 
@@ -1356,28 +1366,24 @@ void Rasterizer::UpdateViewportScissorState() const {
         // still laying the pass out in its native 1920x1080 space. Surfaces that are already guest
         // sized at 4K and also drawn with 4K viewports (for example the display buffer raised by
         // the patch) are left alone, otherwise the content overflows the screen.
-        // Ask the descriptor of this pass whether its target was enlarged. Looking the address up
-        // in the scaled table would also match smaller surfaces that merely live inside the guest
-        // footprint of an enlarged one, and drawing those with a doubled viewport is what made 2D
-        // layers grow and slide out of place.
+        // Ask the image that is actually bound as the target whether it was enlarged. Describing
+        // the pass from its own descriptor is not enough: a pass may describe a strip of a full
+        // screen effect buffer, and that strip shares the enlarged image. Such a pass has to be
+        // laid out in the enlarged space as well, otherwise its content only covers a quarter of
+        // the region the composite samples and every moving bar or gauge is drawn at the wrong size
+        // and place.
         bool guest_hd_space = false;
         u32 target_width = 0;
         for (u32 cb = 0; cb < AmdGpu::NUM_COLOR_BUFFERS; ++cb) {
-            if (!cb_descs[cb].first) {
-                continue;
-            }
-            const auto& info = cb_descs[cb].second.info;
-            if (info.props.is_scaled) {
+            if (cb_image_scaled[cb] != 0) {
                 guest_hd_space = true;
             }
-            target_width = std::max(target_width, info.size.width);
+            target_width = std::max(target_width, cb_image_width[cb]);
         }
-        if (!guest_hd_space && db_desc.first && db_desc.second.info.props.is_scaled) {
+        if (db_image_scaled != 0) {
             guest_hd_space = true;
         }
-        if (db_desc.first) {
-            target_width = std::max(target_width, db_desc.second.info.size.width);
-        }
+        target_width = std::max(target_width, db_image_width);
         if (!guest_hd_space && !regs.IsClipDisabled() && target_width >= 3840 &&
             vp.xscale * 2.0f <= 1920.5f && vp.yscale * 2.0f <= 1080.5f) {
             guest_hd_space = true;
