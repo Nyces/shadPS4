@@ -810,6 +810,12 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
         return;
     }
 
+    // TEMPORARY DIAGNOSTIC: number the draws so the reports below can be ordered. The layer that
+    // replaces its rectangle instead of blending over it has to be drawn after the light sticks,
+    // and the only way to see that is the position of a pass in the frame's draw sequence.
+    static u64 draw_seq = 0;
+    const u64 this_draw = ++draw_seq;
+
     UpdateProbeScale(pipeline);
 
     PrepareRenderState(pipeline);
@@ -911,7 +917,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
                      "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
                      "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}, reads=[{}], "
-                     "blend=(enable={}, src={}, func={}, dst={}, asrc={}, afunc={}, adst={})",
+                     "blend=(enable={}, src={}, func={}, dst={}, asrc={}, afunc={}, adst={}), "
+                     "seq={}",
                      liverpool->regs.color_buffers[0].Address(), cb0_bound ? cb0_size.width : 0u,
                      cb0_bound ? cb0_size.height : 0u,
                      static_cast<u32>(liverpool->regs.primitive_type),
@@ -921,7 +928,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()), draw_reads,
                      u32(blend.enable), u32(blend.color_src_factor), u32(blend.color_func),
                      u32(blend.color_dst_factor), u32(blend.alpha_src_factor), u32(blend.alpha_func),
-                     u32(blend.alpha_dst_factor));
+                     u32(blend.alpha_dst_factor), this_draw);
         }
         // Count how often each variant runs. Two variants of one layer can share a shader pair
         // and differ only in layout, and a session cannot tell that apart from a camera mode
