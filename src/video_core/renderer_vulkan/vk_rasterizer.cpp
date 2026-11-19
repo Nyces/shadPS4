@@ -851,21 +851,11 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                 AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y);
             const bool cb0_bound = static_cast<bool>(cb_descs[0].first);
             const auto& cb0_size = cb_descs[0].second.info.size;
-            // List the extent of everything this pass samples. A layer that is composited from a
-            // source still at the game's own window size reads a target half the destination in
-            // both axes, which is the same picture as a pass whose geometry only covers a quarter,
-            // so the two can only be told apart by what the pass reads and what it writes.
-            std::string reads;
-            for (const auto& binding : image_bindings) {
-                const auto& desc = binding.second;
-                if (reads.size() > 200) {
-                    reads += " ...";
-                    break;
-                }
-                reads += fmt::format("{}{:#x}:{}x{}", reads.empty() ? "" : " ",
-                                     desc.info.guest_address, desc.info.size.width,
-                                     desc.info.size.height);
-            }
+            // List the extent of everything this pass samples. A layer composited from a source
+            // still at the game's own window size reads a target half the destination in both
+            // axes, which is the same picture as a pass whose geometry only covers a quarter, so
+            // the two can only be told apart by what the pass reads and what it writes. A star
+            // marks a sample the sampling path adjusted to a recorded enlarged extent.
             LOG_INFO(Render_Vulkan,
                      "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
                      "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
@@ -876,7 +866,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                      liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, bound_inputs,
                      declared_inputs, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, scsr_w, scsr_h,
                      liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
-                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()), reads);
+                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()),
+                     draw_reads);
         }
         // Count how often each variant runs. Two variants of one layer can share a shader pair
         // and differ only in layout, and a session cannot tell that apart from a camera mode
@@ -1427,6 +1418,7 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
     buffer_barriers.clear();
     buffer_infos.clear();
     image_infos.clear();
+    draw_reads.clear();
 
     bool uses_dma = false;
 
@@ -1968,6 +1960,13 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
             }
 
             image_id = texture_cache.FindImage(desc);
+            if (draw_reads.size() < 220) {
+                const u32 read_w = sharp_width != 0 ? sharp_width : desc.info.size.width;
+                const u32 read_h = sharp_width != 0 ? sharp_height : desc.info.size.height;
+                draw_reads += fmt::format("{}{:#x}:{}x{}{}", draw_reads.empty() ? "" : " ",
+                                          desc.info.guest_address, read_w, read_h,
+                                          sampling_adjusted ? "*" : "");
+            }
             auto* image = &texture_cache.GetImage(image_id);
 
             if (report_sampling) {

@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -158,6 +159,10 @@ private:
     boost::container::static_vector<BufferBindingInfo, Shader::NUM_BUFFERS> buffer_bindings;
     using ImageBindingInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     boost::container::static_vector<ImageBindingInfo, Shader::NUM_IMAGES> image_bindings;
+    // Extent of every image the current draw bound, as text, so a pass can be reported together
+    // with what it reads. The descriptor the sampling path resolves is the only place the size a
+    // layer was authored at is still visible once the target it renders into was enlarged.
+    std::string draw_reads;
     bool fault_process_pending{};
     bool attachment_feedback_loop{};
 
