@@ -94,6 +94,14 @@ public:
 
 private:
     void LogTargetMap(VideoCore::Image& image, u32 which, u32 sample);
+    void UpdateProbeScale(const GraphicsPipeline* pipeline);
+    // Factor the current draw's geometry is scaled by about the top-left corner of its target.
+    // The layer that darkens the frame and makes the light look clear stops exactly at the game's
+    // own window, so it is laid out in that window's pixels while the target it draws into was
+    // already enlarged. A clip-enabled pass multiplies its window coordinates by whatever the
+    // viewport offset and extent are multiplied by, and a clip-disabled one by whatever the push
+    // data carries, so one factor covers both kinds of draw.
+    mutable float probe_scale{1.0f};
     void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
     float PresentationScale() const;
     void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,

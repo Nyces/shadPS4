@@ -751,6 +751,50 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
+// TEMPORARY EXPERIMENT: the layer that darkens the frame and makes the light read clear stops
+// exactly at the game's own window, and it is drawn on top of the light, so it can only be one of
+// the passes that overlay the enlarged colour targets. Those passes were never actually probed:
+// the earlier probe filtered on the index count and all of them draw hundreds of indices. Give
+// every one of them its own factor, so the factor the layer's edge moves by names it.
+void Rasterizer::UpdateProbeScale(const GraphicsPipeline* pipeline) {
+    probe_scale = 1.0f;
+    const auto& regs = liverpool->regs;
+    const VAddr cb0 = regs.color_buffers[0].Address();
+    if (cb0 != 0x207140000ull && cb0 != 0x208240000ull) {
+        return;
+    }
+    const auto stages = pipeline->GetStages();
+    const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
+        const u32 index = u32(s);
+        return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
+    };
+    const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
+    const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
+    if (vs_hash == 0x2d1f9f75ull) {
+        probe_scale = 2.0f;
+    } else if (vs_hash == 0x406058cbull) {
+        probe_scale = 0.5f;
+    } else if (vs_hash == 0x206c135bull) {
+        probe_scale = 0.75f;
+    } else if (vs_hash == 0x105b8d9full) {
+        probe_scale = 1.5f;
+    } else if (vs_hash == 0x5f49d3d1ull) {
+        probe_scale = 1.25f;
+    }
+    if (probe_scale != 1.0f) {
+        static std::unordered_set<u64> logged_probe;
+        const u64 key = (u64(cb0) << 24) ^ (vs_hash << 4) ^ (fs_hash & 0xFull);
+        if (logged_probe.insert(key).second) {
+            LOG_INFO(Render_Vulkan,
+                     "Probe: cb0={:#x} vs={:#x} fs={:#x} scale={} prim={} numIndices={} "
+                     "clipDisabled={} vp=({},{},{},{})",
+                     cb0, vs_hash, fs_hash, probe_scale, static_cast<u32>(regs.primitive_type),
+                     regs.num_indices, regs.IsClipDisabled(), regs.viewports[0].xoffset,
+                     regs.viewports[0].xscale, regs.viewports[0].yoffset, regs.viewports[0].yscale);
+        }
+    }
+}
+
 void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
@@ -765,6 +809,8 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     if (!pipeline) {
         return;
     }
+
+    UpdateProbeScale(pipeline);
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
@@ -1260,6 +1306,9 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
         return;
     }
 
+    // Indirect batches are geometry of the scene itself; the probe only targets the overlays.
+    probe_scale = 1.0f;
+
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
         return;
@@ -1473,6 +1522,14 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                          rt_fit_width, rt_fit_height, push_data.xoffset, push_data.yoffset,
                          push_data.xscale, push_data.yscale);
             }
+        }
+        // TEMPORARY EXPERIMENT: a clip-disabled pass keeps its window coordinates in the push
+        // data conversion, so that is where the probe factor has to go for such a draw.
+        if (probe_scale != 1.0f) {
+            push_data.xoffset *= probe_scale;
+            push_data.xscale *= probe_scale;
+            push_data.yoffset *= probe_scale;
+            push_data.yscale *= probe_scale;
         }
     }
     for (const auto* stage : pipeline->GetStages()) {
@@ -2843,6 +2900,16 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                              converted_x, converted_y);
                 }
             }
+        }
+
+        // TEMPORARY EXPERIMENT: multiplying the offset and the extent by the same factor
+        // multiplies the window coordinates of a clip-enabled pass by it, which scales the
+        // geometry about the top-left corner of the target.
+        if (probe_scale != 1.0f) {
+            viewport.x *= probe_scale;
+            viewport.width *= probe_scale;
+            viewport.y *= probe_scale;
+            viewport.height *= probe_scale;
         }
 
         viewports.push_back(viewport);
