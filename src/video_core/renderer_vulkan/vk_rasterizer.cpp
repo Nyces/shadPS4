@@ -751,16 +751,16 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
-// TEMPORARY EXPERIMENT: the layer that darkens the frame and makes the light read clear stops
-// exactly at the game's own window, and it is drawn on top of the light, so it can only be one of
-// the passes that overlay the enlarged colour targets. Those passes were never actually probed:
-// the earlier probe filtered on the index count and all of them draw hundreds of indices. Give
-// every one of them its own factor, so the factor the layer's edge moves by names it.
+// TEMPORARY EXPERIMENT: the layer's own width changes with the camera and comes back, so it is
+// geometry rebuilt every frame and not a fixed screen quad; the static overlays were the wrong
+// guess. It is drawn after the light sticks and carries five inputs, which is the shape of the
+// backdrop that takes a light and a shadow: it is the pass that follows the light sticks in the
+// frame, so scale only that one and leave everything else untouched.
 void Rasterizer::UpdateProbeScale(const GraphicsPipeline* pipeline) {
     probe_scale = 1.0f;
     const auto& regs = liverpool->regs;
     const VAddr cb0 = regs.color_buffers[0].Address();
-    if (cb0 != 0x207140000ull && cb0 != 0x208240000ull) {
+    if (cb0 != 0x20acc0000ull && cb0 != 0x207140000ull && cb0 != 0x208240000ull) {
         return;
     }
     const auto stages = pipeline->GetStages();
@@ -770,16 +770,8 @@ void Rasterizer::UpdateProbeScale(const GraphicsPipeline* pipeline) {
     };
     const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
     const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
-    if (vs_hash == 0x2d1f9f75ull) {
+    if (vs_hash == 0xd8915e1ull) {
         probe_scale = 2.0f;
-    } else if (vs_hash == 0x406058cbull) {
-        probe_scale = 0.5f;
-    } else if (vs_hash == 0x206c135bull) {
-        probe_scale = 0.75f;
-    } else if (vs_hash == 0x105b8d9full) {
-        probe_scale = 1.5f;
-    } else if (vs_hash == 0x5f49d3d1ull) {
-        probe_scale = 1.25f;
     }
     if (probe_scale != 1.0f) {
         static std::unordered_set<u64> logged_probe;
