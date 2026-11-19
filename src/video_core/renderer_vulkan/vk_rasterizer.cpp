@@ -902,18 +902,26 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
             // axes, which is the same picture as a pass whose geometry only covers a quarter, so
             // the two can only be told apart by what the pass reads and what it writes. A star
             // marks a sample the sampling path adjusted to a recorded enlarged extent.
+            // The layer that keeps its own black border replaces what is already in the target
+            // instead of blending over it: a transparent part of it reveals black, and the light
+            // sticks drawn before it disappear inside its rectangle. Only the blend state separates
+            // such a pass from a normal overlay, so report it with the pass.
+            const auto& blend = liverpool->regs.blend_control[0];
             LOG_INFO(Render_Vulkan,
                      "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
                      "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
-                     "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}, reads=[{}]",
+                     "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}, reads=[{}], "
+                     "blend=(enable={}, src={}, func={}, dst={}, asrc={}, afunc={}, adst={})",
                      liverpool->regs.color_buffers[0].Address(), cb0_bound ? cb0_size.width : 0u,
                      cb0_bound ? cb0_size.height : 0u,
                      static_cast<u32>(liverpool->regs.primitive_type),
                      liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, bound_inputs,
                      declared_inputs, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, scsr_w, scsr_h,
                      liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
-                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()),
-                     draw_reads);
+                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()), draw_reads,
+                     u32(blend.enable), u32(blend.color_src_factor), u32(blend.color_func),
+                     u32(blend.color_dst_factor), u32(blend.alpha_src_factor), u32(blend.alpha_func),
+                     u32(blend.alpha_dst_factor));
         }
         // Count how often each variant runs. Two variants of one layer can share a shader pair
         // and differ only in layout, and a session cannot tell that apart from a camera mode
