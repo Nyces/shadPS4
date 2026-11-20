@@ -751,44 +751,88 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
-// TEMPORARY EXPERIMENT: every pass of the scene writes its colour with one and zero, i.e. it
-// replaces the target, except three. One multiplies the target by its own colour, and that is the
-// only blend that can turn a transparent part of a layer into black and also erase the light
-// sticks drawn before it: the target is multiplied by zero there, whatever the alpha says. The
-// other two add light and blend normally, so give the three distinct factors and leave the rest
-// untouched, which is what the previous probe failed to do.
-void Rasterizer::UpdateProbeScale(const GraphicsPipeline* pipeline) {
-    probe_scale = 1.0f;
-    const auto& regs = liverpool->regs;
-    const VAddr cb0 = regs.color_buffers[0].Address();
-    if (cb0 != 0x20acc0000ull && cb0 != 0x207140000ull && cb0 != 0x208240000ull) {
+// TEMPORARY DIAGNOSTIC: read a few points of the scene target back after one draw and report the
+// draw whenever any of them changed. The layer that stops at the game's own window is drawn late
+// in the frame, and every shader that could plausibly carry it has already been ruled out by
+// scaling it and looking, so the only reliable way left to name it is to watch which draw puts
+// its colour there. The points avoid the centre, where the character stands.
+void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) const {
+    static constexpr std::array<std::pair<u32, u32>, 6> kPoints = {
+        std::pair{120u, 120u}, std::pair{120u, 900u}, std::pair{700u, 120u},
+        std::pair{900u, 600u}, std::pair{1500u, 300u}, std::pair{2000u, 900u}};
+    if (!cb_descs[0].first) {
         return;
     }
-    const auto stages = pipeline->GetStages();
-    const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
-        const u32 index = u32(s);
-        return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
-    };
-    const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
-    const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
-    if (vs_hash == 0x5bc81dabull) {
-        probe_scale = 2.0f;
-    } else if (vs_hash == 0x6cdd330aull) {
-        probe_scale = 0.5f;
-    } else if (fs_hash == 0xe9824e60ull) {
-        probe_scale = 1.5f;
+    auto& image = texture_cache.GetImage(cb_descs[0].first);
+    if (image.info.size.width != 3840 || image.info.size.height != 2160) {
+        return;
     }
-    if (probe_scale != 1.0f) {
-        static std::unordered_set<u64> logged_probe;
-        const u64 key = (u64(cb0) << 24) ^ (vs_hash << 4) ^ (fs_hash & 0xFull);
-        if (logged_probe.insert(key).second) {
-            LOG_INFO(Render_Vulkan,
-                     "Probe: cb0={:#x} vs={:#x} fs={:#x} scale={} prim={} numIndices={} "
-                     "clipDisabled={} vp=({},{},{},{})",
-                     cb0, vs_hash, fs_hash, probe_scale, static_cast<u32>(regs.primitive_type),
-                     regs.num_indices, regs.IsClipDisabled(), regs.viewports[0].xoffset,
-                     regs.viewports[0].xscale, regs.viewports[0].yoffset, regs.viewports[0].yscale);
+    auto& download = buffer_cache.GetUtilityBuffer(VideoCore::MemoryUsage::Download);
+    const auto [data, base_offset] = download.Map(u64(kPoints.size()) * 8);
+    download.Commit();
+    scheduler.EndRendering();
+    const auto cmdbuf = scheduler.CommandBuffer();
+    image.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {});
+    for (u32 i = 0; i < kPoints.size(); ++i) {
+        const vk::BufferImageCopy copy = {
+            .bufferOffset = base_offset + u64(i) * 8,
+            .bufferRowLength = 0,
+            .bufferImageHeight = 0,
+            .imageSubresource =
+                {
+                    .aspectMask = vk::ImageAspectFlagBits::eColor,
+                    .mipLevel = 0,
+                    .baseArrayLayer = 0,
+                    .layerCount = 1,
+                },
+            .imageOffset = {s32(kPoints[i].first), s32(kPoints[i].second), 0},
+            .imageExtent = {1, 1, 1},
+        };
+        cmdbuf.copyImageToBuffer(image.GetImage(), vk::ImageLayout::eTransferSrcOptimal,
+                                 download.Handle(), copy);
+    }
+    scheduler.Finish();
+
+    const auto half = [](u16 h) -> float {
+        const u32 s = (u32(h >> 15) & 1u) << 31;
+        u32 e = u32(h >> 10) & 0x1Fu;
+        u32 m = u32(h) & 0x3FFu;
+        u32 bits = s;
+        if (e == 0) {
+            if (m != 0) {
+                e = 113;
+                while ((m & 0x400u) == 0) {
+                    m <<= 1;
+                    --e;
+                }
+                m &= 0x3FFu;
+                bits = s | (e << 23) | (m << 13);
+            }
+        } else if (e == 31) {
+            bits = s | 0x7F800000u | (m << 13);
+        } else {
+            bits = s | ((e + 112u) << 23) | (m << 13);
         }
+        return std::bit_cast<float>(bits);
+    };
+    std::array<float, 6> now{};
+    for (u32 i = 0; i < kPoints.size(); ++i) {
+        const u16* h = reinterpret_cast<const u16*>(data + u64(i) * 8);
+        now[i] = (half(h[0]) + half(h[1]) + half(h[2])) / 3.0f;
+    }
+    bool changed = !pixel_watch_started;
+    for (u32 i = 0; i < kPoints.size(); ++i) {
+        if (std::abs(now[i] - pixel_watch_prev[i]) > 0.01f) {
+            changed = true;
+        }
+    }
+    if (changed) {
+        LOG_INFO(Render_Vulkan,
+                 "Pixel watch: seq={}, vs={:#x}, fs={:#x}, "
+                 "samples=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f})",
+                 seq, vs_hash, fs_hash, now[0], now[1], now[2], now[3], now[4], now[5]);
+        pixel_watch_prev = now;
+        pixel_watch_started = true;
     }
 }
 
@@ -812,8 +856,6 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     // and the only way to see that is the position of a pass in the frame's draw sequence.
     static u64 draw_seq = 0;
     const u64 this_draw = ++draw_seq;
-
-    UpdateProbeScale(pipeline);
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
@@ -1300,6 +1342,26 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
+    // TEMPORARY DIAGNOSTIC: watch the scene target around the light sticks, which is where the
+    // layer that stops at the game's window has to appear. Arm on the light-stick program and watch
+    // the draws that follow it in the same frame, so the report names the draw that puts the
+    // layer's colour there.
+    if (regs.color_buffers[0].Address() == 0x20acc0000ull) {
+        const auto stages = pipeline->GetStages();
+        const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
+            const u32 index = u32(s);
+            return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
+        };
+        if (stage_hash(Shader::LogicalStage::Vertex) == 0x64cd676aull) {
+            pixel_watch_left = 60;
+            pixel_watch_started = false;
+        } else if (pixel_watch_left > 0) {
+            WatchScenePixels(this_draw, stage_hash(Shader::LogicalStage::Vertex),
+                             stage_hash(Shader::LogicalStage::Fragment));
+            --pixel_watch_left;
+        }
+    }
+
     ResetBindings();
 }
 
@@ -1317,9 +1379,6 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     if (!pipeline) {
         return;
     }
-
-    // Indirect batches are geometry of the scene itself; the probe only targets the overlays.
-    probe_scale = 1.0f;
 
     PrepareRenderState(pipeline);
     if (!BindResources(pipeline)) {
@@ -1534,14 +1593,6 @@ bool Rasterizer::BindResources(const Pipeline* pipeline) {
                          rt_fit_width, rt_fit_height, push_data.xoffset, push_data.yoffset,
                          push_data.xscale, push_data.yscale);
             }
-        }
-        // TEMPORARY EXPERIMENT: a clip-disabled pass keeps its window coordinates in the push
-        // data conversion, so that is where the probe factor has to go for such a draw.
-        if (probe_scale != 1.0f) {
-            push_data.xoffset *= probe_scale;
-            push_data.xscale *= probe_scale;
-            push_data.yoffset *= probe_scale;
-            push_data.yscale *= probe_scale;
         }
     }
     for (const auto* stage : pipeline->GetStages()) {
@@ -2915,15 +2966,6 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
         }
 
         // TEMPORARY EXPERIMENT: multiplying the offset and the extent by the same factor
-        // multiplies the window coordinates of a clip-enabled pass by it, which scales the
-        // geometry about the top-left corner of the target.
-        if (probe_scale != 1.0f) {
-            viewport.x *= probe_scale;
-            viewport.width *= probe_scale;
-            viewport.y *= probe_scale;
-            viewport.height *= probe_scale;
-        }
-
         viewports.push_back(viewport);
 
         auto vp_scsr = scsr;

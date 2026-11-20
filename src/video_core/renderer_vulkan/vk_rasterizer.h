@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <array>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -94,14 +95,11 @@ public:
 
 private:
     void LogTargetMap(VideoCore::Image& image, u32 which, u32 sample);
-    void UpdateProbeScale(const GraphicsPipeline* pipeline);
-    // Factor the current draw's geometry is scaled by about the top-left corner of its target.
-    // The layer that darkens the frame and makes the light look clear stops exactly at the game's
-    // own window, so it is laid out in that window's pixels while the target it draws into was
-    // already enlarged. A clip-enabled pass multiplies its window coordinates by whatever the
-    // viewport offset and extent are multiplied by, and a clip-disabled one by whatever the push
-    // data carries, so one factor covers both kinds of draw.
-    mutable float probe_scale{1.0f};
+    // Read a few points of the scene target back after a single draw and report the draw when any
+    // of them changed. The layer that stops at the game's window is drawn late in the frame, and
+    // every shader that could plausibly carry it has been ruled out by scaling it and looking, so
+    // the only reliable way left to name it is to see which draw actually puts its colour there.
+    void WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) const;
     void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
     float PresentationScale() const;
     void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,
@@ -154,6 +152,11 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
+    // State of the per-draw pixel watch: how many draws are still watched in this frame, whether
+    // the previous reading exists yet, and what it was.
+    mutable u32 pixel_watch_left{};
+    mutable bool pixel_watch_started{};
+    mutable std::array<float, 6> pixel_watch_prev{};
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
