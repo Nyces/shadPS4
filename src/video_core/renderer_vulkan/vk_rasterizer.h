@@ -99,7 +99,7 @@ private:
     // of them changed. The layer that stops at the game's window is drawn late in the frame, and
     // every shader that could plausibly carry it has been ruled out by scaling it and looking, so
     // the only reliable way left to name it is to see which draw actually puts its colour there.
-    void WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) const;
+    void WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash);
     void RecordGuestWindow(u32 scissor_width, u32 scissor_height);
     float PresentationScale() const;
     void ApplyPresentationScale(VideoCore::TextureCache::ImageDesc& desc,
@@ -154,9 +154,9 @@ private:
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
     // State of the per-draw pixel watch: how many draws are still watched in this frame, whether
     // the previous reading exists yet, and what it was.
-    mutable u32 pixel_watch_left{};
-    mutable bool pixel_watch_started{};
-    mutable std::array<float, 6> pixel_watch_prev{};
+    u32 pixel_watch_left{};
+    bool pixel_watch_started{};
+    std::array<float, 6> pixel_watch_prev{};
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;

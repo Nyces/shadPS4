@@ -756,9 +756,9 @@ void Rasterizer::EliminateFastClear() {
 // in the frame, and every shader that could plausibly carry it has already been ruled out by
 // scaling it and looking, so the only reliable way left to name it is to watch which draw puts
 // its colour there. The points avoid the centre, where the character stands.
-void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) const {
+void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) {
     static constexpr std::array<std::pair<u32, u32>, 6> kPoints = {
-        std::pair{120u, 120u}, std::pair{120u, 900u}, std::pair{700u, 120u},
+        std::pair{120u, 120u}, std::pair{120u, 900u},  std::pair{700u, 120u},
         std::pair{900u, 600u}, std::pair{1500u, 300u}, std::pair{2000u, 900u}};
     if (!cb_descs[0].first) {
         return;
@@ -952,22 +952,22 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
             // sticks drawn before it disappear inside its rectangle. Only the blend state separates
             // such a pass from a normal overlay, so report it with the pass.
             const auto& blend = liverpool->regs.blend_control[0];
-            LOG_INFO(Render_Vulkan,
-                     "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
-                     "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
-                     "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}, reads=[{}], "
-                     "blend=(enable={}, src={}, func={}, dst={}, asrc={}, afunc={}, adst={}), "
-                     "seq={}",
-                     liverpool->regs.color_buffers[0].Address(), cb0_bound ? cb0_size.width : 0u,
-                     cb0_bound ? cb0_size.height : 0u,
-                     static_cast<u32>(liverpool->regs.primitive_type),
-                     liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, bound_inputs,
-                     declared_inputs, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, scsr_w, scsr_h,
-                     liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
-                     upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()), draw_reads,
-                     u32(blend.enable), u32(blend.color_src_factor), u32(blend.color_func),
-                     u32(blend.color_dst_factor), u32(blend.alpha_src_factor), u32(blend.alpha_func),
-                     u32(blend.alpha_dst_factor), this_draw);
+            LOG_INFO(
+                Render_Vulkan,
+                "Pass: cb0={:#x} {}x{}, prim={}, clipDisabled={}, vs={:#x}, fs={:#x}, "
+                "inputs={}/{} (bound/declared), vp=({},{},{},{}), scissor={}x{}, "
+                "numIndices={}, fit={}x{}, rtFit={}x{}, upscaled={}, reads=[{}], "
+                "blend=(enable={}, src={}, func={}, dst={}, asrc={}, afunc={}, adst={}), "
+                "seq={}",
+                liverpool->regs.color_buffers[0].Address(), cb0_bound ? cb0_size.width : 0u,
+                cb0_bound ? cb0_size.height : 0u, static_cast<u32>(liverpool->regs.primitive_type),
+                liverpool->regs.IsClipDisabled(), vs_hash, fs_hash, bound_inputs, declared_inputs,
+                vp.xoffset, vp.yoffset, vp.xscale, vp.yscale, scsr_w, scsr_h,
+                liverpool->regs.num_indices, vo_fit_x, vo_fit_y, rt_fit_x, rt_fit_y,
+                upscaled_targets.contains(liverpool->regs.color_buffers[0].Address()), draw_reads,
+                u32(blend.enable), u32(blend.color_src_factor), u32(blend.color_func),
+                u32(blend.color_dst_factor), u32(blend.alpha_src_factor), u32(blend.alpha_func),
+                u32(blend.alpha_dst_factor), this_draw);
         }
         // Count how often each variant runs. Two variants of one layer can share a shader pair
         // and differ only in layout, and a session cannot tell that apart from a camera mode
@@ -2901,14 +2901,12 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 // which is what the stage glass behind the character does. Treat an exactly half
                 // extent as unconverted and take the ratio, while an axis that would overshoot the
                 // target is still left alone.
-                const bool half_x =
-                    rt_fit_width > 0 &&
-                    std::abs(std::abs(viewport.width) * 2.0f - float(rt_fit_width)) <=
-                        float(rt_fit_width) * 0.02f;
-                const bool half_y =
-                    rt_fit_height > 0 &&
-                    std::abs(std::abs(viewport.height) * 2.0f - float(rt_fit_height)) <=
-                        float(rt_fit_height) * 0.02f;
+                const bool half_x = rt_fit_width > 0 &&
+                                    std::abs(std::abs(viewport.width) * 2.0f -
+                                             float(rt_fit_width)) <= float(rt_fit_width) * 0.02f;
+                const bool half_y = rt_fit_height > 0 &&
+                                    std::abs(std::abs(viewport.height) * 2.0f -
+                                             float(rt_fit_height)) <= float(rt_fit_height) * 0.02f;
                 if ((!converted_x && !overshoots_x) || half_x) {
                     viewport.x *= rt_fit_x;
                     viewport.width *= rt_fit_x;
@@ -2928,7 +2926,7 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                         const auto stages = pipeline->GetStages();
                         const u32 index = u32(s);
                         return index < stages.size() && stages[index] ? stages[index]->pgm_hash
-                                                                     : 0ull;
+                                                                      : 0ull;
                     };
                     const u64 vs_hash = stage_hash(Shader::LogicalStage::Vertex);
                     const u64 fs_hash = stage_hash(Shader::LogicalStage::Fragment);
