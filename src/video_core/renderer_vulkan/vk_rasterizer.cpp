@@ -751,15 +751,16 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
-// TEMPORARY DIAGNOSTIC: read a few points of the scene target back after one draw and report the
-// draw whenever any of them changed. The layer that stops at the game's own window is drawn late
-// in the frame, and every shader that could plausibly carry it has already been ruled out by
-// scaling it and looking, so the only reliable way left to name it is to watch which draw puts
-// its colour there. The points avoid the centre, where the character stands.
+// TEMPORARY DIAGNOSTIC: read a few points of a 4K target back after one draw and report the draw
+// whenever any of them changed. The layer that stops at the game's own window is drawn late in the
+// frame and every shader that could plausibly carry it has already been ruled out by scaling it
+// and looking, so the only reliable way left to name it is to watch which draw puts its colour
+// there. The points avoid the centre, where the character stands.
 void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) {
-    static constexpr std::array<std::pair<u32, u32>, 6> kPoints = {
+    static constexpr std::array<std::pair<u32, u32>, 8> kPoints = {
         std::pair{120u, 120u}, std::pair{120u, 900u},  std::pair{700u, 120u},
-        std::pair{900u, 600u}, std::pair{1500u, 300u}, std::pair{2000u, 900u}};
+        std::pair{900u, 600u}, std::pair{1500u, 300u}, std::pair{2000u, 900u},
+        std::pair{300u, 300u}, std::pair{1100u, 500u}};
     if (!cb_descs[0].first) {
         return;
     }
@@ -815,24 +816,34 @@ void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) {
         }
         return std::bit_cast<float>(bits);
     };
-    std::array<float, 6> now{};
+    std::array<float, 8> now{};
     for (u32 i = 0; i < kPoints.size(); ++i) {
         const u16* h = reinterpret_cast<const u16*>(data + u64(i) * 8);
         now[i] = (half(h[0]) + half(h[1]) + half(h[2])) / 3.0f;
     }
-    bool changed = !pixel_watch_started;
-    for (u32 i = 0; i < kPoints.size(); ++i) {
-        if (std::abs(now[i] - pixel_watch_prev[i]) > 0.01f) {
-            changed = true;
+    // Each target keeps its own previous reading: the watched draws alternate between the scene
+    // and the composition targets, and comparing across them would report a change on every draw.
+    const u64 target = cb_descs[0].second.info.guest_address;
+    const auto prev = pixel_watch_prev.find(target);
+    bool changed = prev == pixel_watch_prev.end();
+    if (prev != pixel_watch_prev.end()) {
+        for (u32 i = 0; i < kPoints.size(); ++i) {
+            if (std::abs(now[i] - prev->second[i]) > 0.01f) {
+                changed = true;
+            }
         }
     }
     if (changed) {
+        const auto& vp = liverpool->regs.viewports[0];
         LOG_INFO(Render_Vulkan,
-                 "Pixel watch: seq={}, vs={:#x}, fs={:#x}, "
-                 "samples=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f})",
-                 seq, vs_hash, fs_hash, now[0], now[1], now[2], now[3], now[4], now[5]);
-        pixel_watch_prev = now;
-        pixel_watch_started = true;
+                 "Pixel watch: seq={}, target={:#x}, vs={:#x}, fs={:#x}, "
+                 "rawVP=({},{},{},{}), scissor={}x{}, rtFit={}x{}, "
+                 "samples=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f})",
+                 seq, target, vs_hash, fs_hash, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale,
+                 AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x),
+                 AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y), rt_fit_x,
+                 rt_fit_y, now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7]);
+        pixel_watch_prev[target] = now;
     }
 }
 
@@ -1342,19 +1353,29 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
                     instance_offset);
     }
 
-    // TEMPORARY DIAGNOSTIC: watch the scene target around the light sticks, which is where the
-    // layer that stops at the game's window has to appear. Arm on the light-stick program and watch
-    // the draws that follow it in the same frame, so the report names the draw that puts the
-    // layer's colour there.
-    if (regs.color_buffers[0].Address() == 0x20acc0000ull) {
+    // TEMPORARY DIAGNOSTIC: watch the 4K targets around the light sticks, which is where the layer
+    // that stops at the game's window has to appear. Arm on the light-stick program and watch the
+    // draws that follow it in the same frame, so the report names the draw and the target that put
+    // the layer's colour there. The scene target alone was not enough: it stays black over the
+    // whole area the layer covers, so the layer is composited afterwards.
+    {
         const auto stages = pipeline->GetStages();
         const auto stage_hash = [&stages](Shader::LogicalStage s) -> u64 {
             const u32 index = u32(s);
             return index < stages.size() && stages[index] ? stages[index]->pgm_hash : 0ull;
         };
-        if (stage_hash(Shader::LogicalStage::Vertex) == 0x64cd676aull) {
-            pixel_watch_left = 60;
-            pixel_watch_started = false;
+        const auto target_addr = regs.color_buffers[0].Address();
+        if (target_addr == 0x20acc0000ull &&
+            stage_hash(Shader::LogicalStage::Vertex) == 0x64cd676aull) {
+            if (pixel_watch_left == 0) {
+                static bool armed_logged = false;
+                if (!armed_logged) {
+                    armed_logged = true;
+                    LOG_INFO(Render_Vulkan, "Pixel watch armed: seq={}", this_draw);
+                }
+            }
+            pixel_watch_left = 600;
+            pixel_watch_prev.clear();
         } else if (pixel_watch_left > 0) {
             WatchScenePixels(this_draw, stage_hash(Shader::LogicalStage::Vertex),
                              stage_hash(Shader::LogicalStage::Fragment));

@@ -152,11 +152,11 @@ private:
     using RenderTargetInfo = std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc>;
     std::array<RenderTargetInfo, AmdGpu::NUM_COLOR_BUFFERS> cb_descs;
     std::pair<VideoCore::ImageId, VideoCore::TextureCache::ImageDesc> db_desc;
-    // State of the per-draw pixel watch: how many draws are still watched in this frame, whether
-    // the previous reading exists yet, and what it was.
+    // State of the per-draw pixel watch: how many draws are still watched in this frame and, per
+    // target, the last reading, so the scene and the composition targets can be compared
+    // independently.
     u32 pixel_watch_left{};
-    bool pixel_watch_started{};
-    std::array<float, 6> pixel_watch_prev{};
+    std::unordered_map<u64, std::array<float, 8>> pixel_watch_prev;
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;
