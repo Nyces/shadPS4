@@ -1896,8 +1896,12 @@ void Rasterizer::BindBuffers(const Shader::Info& stage, Shader::Backend::Binding
 }
 
 void Rasterizer::LogTargetMap(VideoCore::Image& image, u32 which, u32 sample) {
-    constexpr u32 grid_cols = 32;
-    constexpr u32 grid_rows = 18;
+    // The layer that stops at the game's window has a hard edge, and a 32 column grid only
+    // resolves it to within 120 pixels, which cannot tell 1920 from 2048 or 2404. Sample at
+    // twice that resolution so the edge of the rectangle can be read off the map directly and
+    // compared against the guest window width in the surface.
+    constexpr u32 grid_cols = 64;
+    constexpr u32 grid_rows = 36;
     constexpr u32 grid_cells = grid_cols * grid_rows;
     const u32 grid_w = image.info.size.width;
     const u32 grid_h = image.info.size.height;
@@ -2025,7 +2029,7 @@ void Rasterizer::LogTargetMap(VideoCore::Image& image, u32 which, u32 sample) {
 
 void Rasterizer::DumpSceneTargets() {
     static u32 frames = 0;
-    if (++frames % 120 != 10) {
+    if (++frames % 40 != 7) {
         return;
     }
     // Read the scene targets once the frame is complete. Sampling them when they are bound as
@@ -2229,7 +2233,7 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                 const u32 logged = grid_logs[slot];
                 const bool enlarged = image.info.size.width >= 3840;
                 const bool sample_now =
-                    (enlarged && logged == 0) || (hits % 100 == 1 && logged < 8);
+                    (enlarged && logged == 0) || (hits % 40 == 1 && logged < 16);
                 if (sample_now) {
                     grid_logs[slot] = logged + 1;
                     LogTargetMap(image, which, logged + 1);
