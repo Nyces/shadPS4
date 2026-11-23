@@ -74,9 +74,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-26]
+        os: [windows-2022, ubuntu-latest, macos-26]
         include:
-          - os: windows-latest
+          - os: windows-2022
             compiler_cxx: clang-cl
             compiler_c: clang-cl
           - os: ubuntu-latest
@@ -145,7 +145,11 @@ jobs:
         shell: bash
 
   windows-sdl:
-    runs-on: windows-2025-vs2026
+    # The VS 2026 image ships an MSVC 14.52 standard library that refuses to compile with any
+    # clang older than 22, and the clang-cl bundled with the runner is older than that, so every
+    # translation unit that includes a standard header fails before reaching our code. Keep the
+    # Windows build on the image whose toolchain still matches the compiler it is given.
+    runs-on: windows-2022
     needs: get-info
     steps:
     - uses: actions/checkout@v6
