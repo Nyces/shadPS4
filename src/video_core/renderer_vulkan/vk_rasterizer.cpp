@@ -528,6 +528,20 @@ void Rasterizer::PrepareRenderState(const GraphicsPipeline* pipeline) {
         image_id = bound_images.emplace_back(texture_cache.FindImage(desc));
         auto& image = texture_cache.GetImage(image_id);
         image.binding.is_target = 1u;
+        // Remember the enlarged extent under the address the image actually resolved to. The
+        // render path records the extent derived from the colour descriptor, but the sampling
+        // path looks the same allocation up from a texture descriptor, and the two do not
+        // always describe it with the same key. When the keys differ the sampling path misses
+        // the record, resolves the window-sized image cached next to the enlarged one, and the
+        // stage composites that 1080p image one-to-one into the corner of the frame, which is
+        // what makes the light layer stop at the game's window while everything else is
+        // enlarged. The output surface is excluded: it is already sized for presentation.
+        if (!liverpool->FindVideoOutSurface(image.info.guest_address) && guest_window_width > 0 &&
+            guest_window_height > 0 && image.info.size.width > guest_window_width &&
+            image.info.size.height > guest_window_height) {
+            upscaled_targets[image.info.guest_address] = {image.info.size.width,
+                                                          image.info.size.height};
+        }
 
         {
             // Report every distinct render target with the register state it was derived
@@ -2109,6 +2123,31 @@ void Rasterizer::BindTextures(const Shader::Info& stage, Shader::Backend::Bindin
                                           sampling_adjusted ? "*" : "");
             }
             auto* image = &texture_cache.GetImage(image_id);
+
+            {
+                // A pass that already renders at the presentation scale must not consume an
+                // input described at the game's window: the cache resolves such a descriptor
+                // to the window-sized image cached next to the enlarged one, and whatever the
+                // stage draws then lands one-to-one in the corner of the frame. Report the
+                // remaining ones after the render path recorded its extent, so an input that
+                // still takes that path can be named instead of guessed at.
+                static std::unordered_set<u64> logged_window_input;
+                if (rt_fit_x > 1.001f && !sampling_adjusted && guest_window_width > 0 &&
+                    image->info.size.width == guest_window_width &&
+                    image->info.size.height == guest_window_height) {
+                    const u64 k = (u64(desc.info.guest_address) << 32) ^
+                                  (u64(stage.pgm_hash) << 8) ^ u64(desc.info.pixel_format);
+                    if (logged_window_input.insert(k).second) {
+                        LOG_INFO(Render_Vulkan,
+                                 "Window-size input: out={:#x}, addr={:#x}, shader={:#x}, "
+                                 "resolved={}x{}, recorded={}",
+                                 liverpool->regs.color_buffers[0].Address(),
+                                 desc.info.guest_address, stage.pgm_hash, image->info.size.width,
+                                 image->info.size.height,
+                                 upscaled_targets.contains(desc.info.guest_address));
+                    }
+                }
+            }
 
             if (report_sampling) {
                 // Report the image the lookup actually resolved to, and keep reporting
