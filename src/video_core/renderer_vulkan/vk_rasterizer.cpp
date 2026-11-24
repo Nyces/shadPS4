@@ -47,6 +47,14 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
 // a pass the patch converted. Recognise the program and force the ratio onto it.
 static constexpr u64 TEXT_LAYER_VERTEX_HASH = 0xb6a13818ull;
 
+// Fragment program of the stage backdrop layer. Like the text layer it does not take its
+// quad from the vertex positions: it builds it from the window size it reads back from a
+// constant buffer. The resolution patch doubled that size, so the quad's own coordinates
+// now describe half of the enlarged scene target, and the layer covers only the top-left
+// quadrant of the frame: a hard rectangle ending at the game's original 1920x1080, with the
+// character's shadow inside it, while everything outside it still shows the enlarged pass.
+static constexpr u64 STAGE_BACKDROP_FRAGMENT_HASH = 0x7098d0c8ull;
+
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
                        AmdGpu::Liverpool* liverpool_)
     : instance{instance_}, scheduler{scheduler_}, page_manager{this},
@@ -2978,6 +2986,38 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 if ((!converted_y && !overshoots_y) || half_y) {
                     viewport.y *= rt_fit_y;
                     viewport.height *= rt_fit_y;
+                }
+                // The stage backdrop layer builds its quad from the window size it reads back
+                // from a constant buffer, so the size the patch wrote there leaves the quad
+                // covering only the top-left quadrant of the enlarged target. Take the ratio
+                // once more on both axes so the quad reaches the corners; the scissor already
+                // spans the target, so the extra extent is clipped there.
+                if (pipeline) {
+                    const auto stage_hash = [pipeline](Shader::LogicalStage s) -> u64 {
+                        const auto stages = pipeline->GetStages();
+                        const u32 index = u32(s);
+                        return index < stages.size() && stages[index] ? stages[index]->pgm_hash
+                                                                      : 0ull;
+                    };
+                    if (stage_hash(Shader::LogicalStage::Fragment) ==
+                        STAGE_BACKDROP_FRAGMENT_HASH) {
+                        static std::unordered_set<u64> logged_backdrop;
+                        const u64 k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
+                                      (u64(std::bit_cast<u32>(vp.xscale)) << 16) ^
+                                      u64(std::bit_cast<u32>(vp.yscale));
+                        if (logged_backdrop.insert(k).second) {
+                            LOG_INFO(Render_Vulkan,
+                                     "Stage backdrop: cb0={:#x}, rawVP=({},{},{},{}), "
+                                     "finalVP=({},{} {}x{})",
+                                     liverpool->regs.color_buffers[0].Address(), vp.xoffset,
+                                     vp.yoffset, vp.xscale, vp.yscale, viewport.x, viewport.y,
+                                     viewport.width, viewport.height);
+                        }
+                        viewport.x *= 2.0f;
+                        viewport.width *= 2.0f;
+                        viewport.y *= 2.0f;
+                        viewport.height *= 2.0f;
+                    }
                 }
                 // Report only the passes this rule changed, i.e. those the scissor test had
                 // already accepted as converted while their extent is still half the target.
