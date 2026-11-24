@@ -156,7 +156,7 @@ private:
     // target, the last reading, so the scene and the composition targets can be compared
     // independently.
     u32 pixel_watch_left{};
-    std::unordered_map<u64, std::array<float, 8>> pixel_watch_prev;
+    std::unordered_map<u64, std::array<float, 12>> pixel_watch_prev;
     boost::container::static_vector<vk::DescriptorImageInfo, Shader::NUM_IMAGES> image_infos;
     boost::container::static_vector<vk::DescriptorBufferInfo, Shader::NUM_BUFFERS> buffer_infos;
     boost::container::static_vector<VideoCore::ImageId, Shader::NUM_IMAGES> bound_images;

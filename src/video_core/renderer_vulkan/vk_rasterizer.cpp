@@ -47,14 +47,6 @@ static Shader::PushData MakeUserData(const AmdGpu::Regs& regs) {
 // a pass the patch converted. Recognise the program and force the ratio onto it.
 static constexpr u64 TEXT_LAYER_VERTEX_HASH = 0xb6a13818ull;
 
-// Fragment program of the stage backdrop layer. Like the text layer it does not take its
-// quad from the vertex positions: it builds it from the window size it reads back from a
-// constant buffer. The resolution patch doubled that size, so the quad's own coordinates
-// now describe half of the enlarged scene target, and the layer covers only the top-left
-// quadrant of the frame: a hard rectangle ending at the game's original 1920x1080, with the
-// character's shadow inside it, while everything outside it still shows the enlarged pass.
-static constexpr u64 STAGE_BACKDROP_FRAGMENT_HASH = 0x7098d0c8ull;
-
 Rasterizer::Rasterizer(const Instance& instance_, Scheduler& scheduler_,
                        AmdGpu::Liverpool* liverpool_)
     : instance{instance_}, scheduler{scheduler_}, page_manager{this},
@@ -773,16 +765,17 @@ void Rasterizer::EliminateFastClear() {
     ScopeMarkerEnd();
 }
 
-// TEMPORARY DIAGNOSTIC: read a few points of a 4K target back after one draw and report the draw
-// whenever any of them changed. The layer that stops at the game's own window is drawn late in the
-// frame and every shader that could plausibly carry it has already been ruled out by scaling it
-// and looking, so the only reliable way left to name it is to watch which draw puts its colour
-// there. The points avoid the centre, where the character stands.
+// TEMPORARY DIAGNOSTIC: read a column of points of a 4K target back after one draw and report the
+// draw whenever any of them changed. The layer that stops at the game's own window has a hard edge
+// whose position is the only thing that identifies it: the points below march across that edge in
+// 60 pixel steps around the guest window width, and down past its height, so a draw that paints
+// the rectangle names itself and its exact boundary in one report.
 void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) {
-    static constexpr std::array<std::pair<u32, u32>, 8> kPoints = {
-        std::pair{120u, 120u}, std::pair{120u, 900u},  std::pair{700u, 120u},
-        std::pair{900u, 600u}, std::pair{1500u, 300u}, std::pair{2000u, 900u},
-        std::pair{300u, 300u}, std::pair{1100u, 500u}};
+    static constexpr std::array<std::pair<u32, u32>, 12> kPoints = {
+        std::pair{600u, 300u},   std::pair{1400u, 300u}, std::pair{1850u, 300u},
+        std::pair{1950u, 300u},  std::pair{2050u, 300u}, std::pair{2300u, 300u},
+        std::pair{2600u, 300u},  std::pair{3100u, 300u}, std::pair{600u, 1200u},
+        std::pair{1400u, 1200u}, std::pair{600u, 1600u}, std::pair{300u, 400u}};
     if (!cb_descs[0].first) {
         return;
     }
@@ -838,7 +831,7 @@ void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) {
         }
         return std::bit_cast<float>(bits);
     };
-    std::array<float, 8> now{};
+    std::array<float, 12> now{};
     for (u32 i = 0; i < kPoints.size(); ++i) {
         const u16* h = reinterpret_cast<const u16*>(data + u64(i) * 8);
         now[i] = (half(h[0]) + half(h[1]) + half(h[2])) / 3.0f;
@@ -860,11 +853,13 @@ void Rasterizer::WatchScenePixels(u64 seq, u64 vs_hash, u64 fs_hash) {
         LOG_INFO(Render_Vulkan,
                  "Pixel watch: seq={}, target={:#x}, vs={:#x}, fs={:#x}, "
                  "rawVP=({},{},{},{}), scissor={}x{}, rtFit={}x{}, "
-                 "samples=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f})",
+                 "samples=({:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},{:.3f},"
+                 "{:.3f},{:.3f},{:.3f},{:.3f})",
                  seq, target, vs_hash, fs_hash, vp.xoffset, vp.yoffset, vp.xscale, vp.yscale,
                  AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_x),
                  AmdGpu::Scissor::Clamp(liverpool->regs.screen_scissor.bottom_right_y), rt_fit_x,
-                 rt_fit_y, now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7]);
+                 rt_fit_y, now[0], now[1], now[2], now[3], now[4], now[5], now[6], now[7], now[8],
+                 now[9], now[10], now[11]);
         pixel_watch_prev[target] = now;
     }
 }
@@ -2841,10 +2836,6 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
         const auto zscale = vp_ctl.zscale_enable ? vp.zscale : 1.f;
 
         vk::Viewport viewport{};
-        // Set when this pass carries the stage backdrop layer, whose coordinates come from the
-        // game's window rather than from the viewport registers. Its scissor has to open up to
-        // the enlarged target for the same reason its viewport is taken twice.
-        bool backdrop_pass = false;
 
         // https://gitlab.freedesktop.org/mesa/mesa/-/blob/209a0ed/src/amd/vulkan/radv_pipeline_graphics.c#L688-689
         // https://gitlab.freedesktop.org/mesa/mesa/-/blob/209a0ed/src/amd/vulkan/radv_cmd_buffer.c#L3103-3109
@@ -2993,39 +2984,11 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 }
                 // The stage backdrop layer builds its quad from the window size it reads back
                 // from a constant buffer, so the size the patch wrote there leaves the quad
-                // covering only the top-left quadrant of the enlarged target. Take the ratio
-                // once more on both axes so the quad reaches the corners; the scissor already
-                // spans the target, so the extra extent is clipped there.
-                if (pipeline) {
-                    const auto stage_hash = [pipeline](Shader::LogicalStage s) -> u64 {
-                        const auto stages = pipeline->GetStages();
-                        const u32 index = u32(s);
-                        return index < stages.size() && stages[index] ? stages[index]->pgm_hash
-                                                                      : 0ull;
-                    };
-                    if (stage_hash(Shader::LogicalStage::Fragment) ==
-                        STAGE_BACKDROP_FRAGMENT_HASH) {
-                        static std::unordered_set<u64> logged_backdrop;
-                        const u64 k = (u64(liverpool->regs.color_buffers[0].Address() >> 8) << 40) ^
-                                      (u64(std::bit_cast<u32>(vp.xscale)) << 16) ^
-                                      u64(std::bit_cast<u32>(vp.yscale));
-                        if (logged_backdrop.insert(k).second) {
-                            LOG_INFO(Render_Vulkan,
-                                     "Stage backdrop: cb0={:#x}, rawVP=({},{},{},{}), "
-                                     "finalVP=({},{} {}x{})",
-                                     liverpool->regs.color_buffers[0].Address(), vp.xoffset,
-                                     vp.yoffset, vp.xscale, vp.yscale, viewport.x, viewport.y,
-                                     viewport.width, viewport.height);
-                        }
-                        viewport.x *= 2.0f;
-                        viewport.width *= 2.0f;
-                        viewport.y *= 2.0f;
-                        viewport.height *= 2.0f;
-                        backdrop_pass = true;
-                    }
-                }
-                // Report only the passes this rule changed, i.e. those the scissor test had
-                // already accepted as converted while their extent is still half the target.
+                // covering only the top-left quadrant of the enlarged target. Taking the ratio
+                // once more on both axes was tried and moved the character's shadow away from
+                // the model toward the bottom-right corner without enlarging the layer: the
+                // content is positioned through a projection, not from the window's pixels, so
+                // it must be left exactly as the game wrote it.
                 if ((half_x && converted_x) || (half_y && converted_y)) {
                     static std::unordered_set<u64> logged_half;
                     const auto stage_hash = [pipeline](Shader::LogicalStage s) -> u64 {
@@ -3103,17 +3066,6 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 u32(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_x) * rt_fit_x), 16384u));
             vp_scsr.bottom_right_y = s16(std::min<u32>(
                 u32(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_y) * rt_fit_y), 16384u));
-        }
-        if (backdrop_pass) {
-            // The backdrop layer's geometry was taken from the game's window onto the enlarged
-            // target above, so the scissor the game wrote for that window would cut the extra
-            // extent off again on whatever axis the game clipped to a fraction of it.
-            const u32 target_w = rt_fit_width != 0 ? rt_fit_width : u32(vo_surface_width);
-            const u32 target_h = rt_fit_height != 0 ? rt_fit_height : u32(vo_surface_height);
-            vp_scsr.top_left_x = 0;
-            vp_scsr.top_left_y = 0;
-            vp_scsr.bottom_right_x = s16(std::min<u32>(target_w != 0 ? target_w : 16384u, 16384u));
-            vp_scsr.bottom_right_y = s16(std::min<u32>(target_h != 0 ? target_h : 16384u, 16384u));
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
