@@ -2841,6 +2841,10 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
         const auto zscale = vp_ctl.zscale_enable ? vp.zscale : 1.f;
 
         vk::Viewport viewport{};
+        // Set when this pass carries the stage backdrop layer, whose coordinates come from the
+        // game's window rather than from the viewport registers. Its scissor has to open up to
+        // the enlarged target for the same reason its viewport is taken twice.
+        bool backdrop_pass = false;
 
         // https://gitlab.freedesktop.org/mesa/mesa/-/blob/209a0ed/src/amd/vulkan/radv_pipeline_graphics.c#L688-689
         // https://gitlab.freedesktop.org/mesa/mesa/-/blob/209a0ed/src/amd/vulkan/radv_cmd_buffer.c#L3103-3109
@@ -3017,6 +3021,7 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                         viewport.width *= 2.0f;
                         viewport.y *= 2.0f;
                         viewport.height *= 2.0f;
+                        backdrop_pass = true;
                     }
                 }
                 // Report only the passes this rule changed, i.e. those the scissor test had
@@ -3098,6 +3103,17 @@ void Rasterizer::UpdateViewportScissorState(const GraphicsPipeline* pipeline) co
                 u32(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_x) * rt_fit_x), 16384u));
             vp_scsr.bottom_right_y = s16(std::min<u32>(
                 u32(AmdGpu::Scissor::Clamp(vp_scsr.bottom_right_y) * rt_fit_y), 16384u));
+        }
+        if (backdrop_pass) {
+            // The backdrop layer's geometry was taken from the game's window onto the enlarged
+            // target above, so the scissor the game wrote for that window would cut the extra
+            // extent off again on whatever axis the game clipped to a fraction of it.
+            const u32 target_w = rt_fit_width != 0 ? rt_fit_width : u32(vo_surface_width);
+            const u32 target_h = rt_fit_height != 0 ? rt_fit_height : u32(vo_surface_height);
+            vp_scsr.top_left_x = 0;
+            vp_scsr.top_left_y = 0;
+            vp_scsr.bottom_right_x = s16(std::min<u32>(target_w != 0 ? target_w : 16384u, 16384u));
+            vp_scsr.bottom_right_y = s16(std::min<u32>(target_h != 0 ? target_h : 16384u, 16384u));
         }
         scissors.push_back({
             .offset = {vp_scsr.top_left_x, vp_scsr.top_left_y},
